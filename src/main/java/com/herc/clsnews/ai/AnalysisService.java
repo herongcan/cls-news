@@ -30,7 +30,8 @@ public class AnalysisService {
      * 结果多新算「不用重算」。
      * 这条规则挡的不是技术问题，是人的问题：10 个同事共用一个账号，
      * 同一条消息谁都想点一下看看，没有这层保护就是 10 次调用。
-     * 真要重算，前端点「重新分析」会带 force=true 绕过去。
+     * 真要重算由运维带 force=true 手工调接口 —— 界面故意不提供这个入口：
+     * 同样的输入再喂一遍模型，答案基本不会变，点一次只是多花一次钱。
      */
     private static final long FRESH_SECONDS = 90;
 
@@ -71,8 +72,9 @@ public class AnalysisService {
     /**
      * 今日已调用模型的次数（不是「已分析的行数」）。
      *
-     * <p>为什么按调用次数算配额：同一行可以被「重新分析」反复点，按行数计永远撞不到上限，
-     * 而每次都是真金白银的一次请求。查表而不是内存计数器，重启和多实例都准。
+     * <p>为什么按调用次数算配额：失败重试和运维手工重算会让同一行被调用多次，
+     * 按「已分析的行数」计永远撞不到上限，而每次都是真金白银的一次请求。
+     * 查表而不是内存计数器，重启和多实例都准。
      */
     public long usedToday() {
         long startOfDay = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toEpochSecond();
@@ -103,7 +105,7 @@ public class AnalysisService {
      * <p>语义是「用户点了就出结果」，所以三种情况不调模型：
      * 已经分析过且结果新鲜（返回旧结果）、有人正在分析（BUSY）、今日配额用完（CAPPED）。
      *
-     * @param force true 时无视新鲜度强制重算，对应界面上的「重新分析」
+     * @param force true 时无视新鲜度强制重算，只给运维手工调用，界面不暴露
      * @throws AnalysisException 所有可预期的失败都从这里出去，带状态码和错误码
      */
     public Outcome analyzeNews(long id, boolean force) {

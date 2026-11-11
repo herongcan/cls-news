@@ -103,7 +103,8 @@ public class NewsController {
      * <p>返回完整 NewsView 而不只是分析结果：前端拿到直接整块替换那一行的分析区，
      * 不用再发一次请求、也不用在前端拼一份平行的数据结构。
      *
-     * @param force true = 无视「结果还新鲜」的保护强制重算，对应界面上的「重新分析」
+     * @param force true = 无视「结果还新鲜」的保护强制重算。界面上没有这个入口，
+     *              只留给运维手工调（改完 prompt 或换模型后重算某一条）
      */
     @PostMapping("/news/{id}/analyze")
     public ResponseEntity<?> analyze(@PathVariable long id,

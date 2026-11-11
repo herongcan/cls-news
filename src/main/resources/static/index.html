@@ -70,8 +70,6 @@
              display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
   button.act:hover{background:rgba(255,255,255,.03)}
   button.act:disabled{opacity:.55;cursor:default;border-color:var(--line-2)}
-  button.act.ghost{border-color:transparent;color:var(--dim)}
-  button.act.ghost:hover{border-color:var(--line-2);color:var(--text)}
   button.act.err{color:var(--up);border-color:rgba(229,72,77,.4)}
   .spin{width:10px;height:10px;flex:none;display:inline-block;border:1.5px solid var(--line-2);
         border-top-color:var(--muted);border-radius:50%;animation:spin .7s linear infinite}
@@ -129,7 +127,8 @@
   个人自用 · 内容版权归财联社所有，仅做本地研究，不对外转载<br>
   服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量；
   向下滚动自动加载更早的记录，点击股票标签可跳转行情页<br>
-  大模型分析为手动触发：点「分析」才调用，同一条 90 秒内重复点会直接返回上次结果、不重复计费<br>
+  大模型分析为手动触发：只有还没结论的条目才有「分析」按钮，已出结果的不再提供重算入口<br>
+  两个人同时点同一条只会算一次调用，另一个人直接拿到对方的结果
   访客数按 IP 去重：同一 IP 一天只算一次，同一出口 IP 下的多个人会被算作一个
 </footer>
 
@@ -186,21 +185,25 @@
   }
 
   /**
-   * 操作区：三种态对应三种按钮。
+   * 操作区：只有「还没结论」的条目才有按钮。
    * analyzing 必须显示「分析中」而不是可点的按钮 —— 否则用户会以为没生效，反复点。
+   *
+   * 有一条新闻已经得出利好/利空之后，这里什么都不渲染。
+   * 理由：同样的输入再喂一遍模型，答案基本不会变，点一次就是白花一次钱；
+   * 而「改了 prompt / 换了模型想重算」是运维动作，走
+   * POST /api/analysis/retry-failed 或带 force=true 的接口手工触发，不该摆在每条新闻旁边。
+   * failed 是例外：那不是重算，是这次没成功，得给人一个再试的入口。
    */
   function actionHtml(n) {
     const st = n.analysisStatus || 'pending';
     if (st === 'analyzing') {
       return '<button class="act" disabled><span class="spin"></span>分析中</button>';
     }
-    if (n.analysis) {
-      // 已有结论：只留一个很淡的「重新分析」，防止误触重复花钱
-      return '<button class="act ghost" data-act="analyze" data-force="1"' +
-             ' title="重新调用模型分析这条（会计费）">重新分析</button>';
-    }
     if (st === 'failed') {
       return '<button class="act err" data-act="analyze">重试分析</button>';
+    }
+    if (n.analysis) {
+      return '';
     }
     return '<button class="act" data-act="analyze">分析</button>';
   }
@@ -321,13 +324,13 @@
     if (ana) ana.innerHTML = html;
   }
 
-  async function doAnalyze(li, force) {
+  async function doAnalyze(li) {
     const id = Number(li.dataset.id);
     const n = itemsById.get(id);
     if (!n) return;
     setAna(li, '<span class="spin"></span><span class="note">模型分析中…</span>');
     try {
-      const res = await fetch('/api/news/' + id + '/analyze' + (force ? '?force=true' : ''),
+      const res = await fetch('/api/news/' + id + '/analyze',
           { method: 'POST', cache: 'no-store', signal: timeoutSignal(40000) });
       const data = await res.json().catch(() => ({}));
 
@@ -344,8 +347,7 @@
       const timeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
       const msg = timeout ? '等待超时，稍后自动取结果' : (e.message || '请求失败');
       setAna(li, '<span class="note err">' + esc(msg) + '</span>' +
-                 '<button class="act err" data-act="analyze"' + (force ? ' data-force="1"' : '') +
-                 '>重试</button>');
+                 '<button class="act err" data-act="analyze">重试</button>');
       // 超时 ≠ 失败：服务端可能还在跑，几秒后回头查一次，别让用户白等一遍再重花钱
       if (timeout) setTimeout(() => refreshOne(id), 6000);
     }
@@ -515,7 +517,7 @@
     const btn = e.target.closest('button[data-act="analyze"]');
     if (!btn || btn.disabled) return;
     const li = btn.closest('li');
-    if (li) doAnalyze(li, btn.dataset.force === '1');
+    if (li) doAnalyze(li);
   });
 
   moreEl.addEventListener('click', () => {

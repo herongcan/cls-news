@@ -106,7 +106,7 @@ public class NewsStore {
      * 单条原子认领。手动分析用，等价于 {@link #claimPending} 的「抢一条」版本。
      *
      * <p>为什么条件写 {@code analysis_status <> 'analyzing'} 而不是 {@code = 'pending'}：
-     * 手动模式下用户会主动点「重新分析」，已 done 的行必须允许重算；
+     * 界面只给「没结论」的条目按钮，但运维带 force=true 手工重算时已 done 的行也必须放行；
      * 唯一要挡的是「已经有人在算」，否则两个人同时点同一条就是两次扣费。
      *
      * <p>返回空 Optional 有两种可能：id 不存在、或已被别的请求抢走 ——

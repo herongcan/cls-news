@@ -95,9 +95,43 @@
   #sentinel{height:1px}
   footer{max-width:920px;margin:0 auto;padding:0 20px 40px;
          color:var(--dim);font-size:11px;line-height:1.8}
+  /* 登录层：移动端浏览器不弹 Basic 原生框，凭证只能由页面自己收。
+     全屏铺满、跟列表同一套配色，免得看起来像「跳到了别的网站」。 */
+  #gate{position:fixed;inset:0;z-index:100;background:var(--bg);
+        display:flex;align-items:center;justify-content:center;padding:24px}
+  #gate[hidden]{display:none}
+  #gateForm{width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px}
+  .gate-title{font-size:18px;font-weight:500;letter-spacing:.3px}
+  .gate-sub{color:var(--dim);font-size:12px;margin-bottom:10px}
+  /* 16px 是硬要求：iOS Safari 遇到字号小于 16px 的 input 会自动放大整页，
+     而且不会自己缩回去，登录完列表就是糊的。 */
+  #gate input{background:var(--panel);border:.5px solid var(--line-2);border-radius:8px;
+              color:var(--text);font-size:16px;line-height:1.2;padding:11px 13px;
+              font-family:inherit;outline:none;-webkit-appearance:none;appearance:none}
+  #gate input:focus{border-color:#3b414c}
+  #gate button{margin-top:4px;background:var(--text);border:none;border-radius:8px;
+               color:#0a0b0d;font-size:15px;font-weight:500;padding:11px;cursor:pointer}
+  #gate button:hover{color:#0a0b0d;border:none}
+  #gate button:disabled{opacity:.55;cursor:default}
+  .gate-err{color:var(--up);font-size:12px;min-height:18px;text-align:center}
 </style>
 </head>
 <body>
+
+<!-- 登录层默认显示，拿到有效凭证后再隐藏。
+     放这里而不是靠 JS 动态创建，是为了首屏就有东西，不会先闪一下空白列表。 -->
+<div id="gate">
+  <form id="gateForm" novalidate>
+    <div class="gate-title">财联社电报</div>
+    <div class="gate-sub">内部工具 · 请输入账号密码</div>
+    <input id="gu" type="text" placeholder="账号" autocomplete="username"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+    <input id="gp" type="password" placeholder="密码" autocomplete="current-password">
+    <button id="gbtn" type="submit">进入</button>
+    <div id="gerr" class="gate-err"></div>
+  </form>
+</div>
+
 <header>
   <div class="brand">
     <span class="dot" id="live"></span>
@@ -128,7 +162,7 @@
   服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量；
   向下滚动自动加载更早的记录，点击股票标签可跳转行情页<br>
   大模型分析为手动触发：只有还没结论的条目才有「分析」按钮，已出结果的不再提供重算入口<br>
-  两个人同时点同一条只会算一次调用，另一个人直接拿到对方的结果
+  两个人同时点同一条只会算一次调用，另一个人直接拿到对方的结果<br>
   访客数按 IP 去重：同一 IP 一天只算一次，同一出口 IP 下的多个人会被算作一个
 </footer>
 
@@ -148,6 +182,89 @@
   const anaTodayEl = document.getElementById('anaToday');
   const vTodayEl = document.getElementById('vToday');
   const vTotalEl = document.getElementById('vTotal');
+
+  // ---------- 登录 ----------
+  // 为什么不用浏览器原生的 Basic 弹窗：移动端（微信、QQ、UC 的内置内核，以及不少
+  // Android WebView）收到 401 根本不弹框，而是把「需要登录」渲染成一张白页。
+  // 所以服务端把 index.html 放行，登录框做在页面里，凭证 Base64 之后塞进 Authorization。
+  const AUTH_KEY = 'cls.auth';
+  const gateEl = document.getElementById('gate');
+  const gateForm = document.getElementById('gateForm');
+  const gateUser = document.getElementById('gu');
+  const gatePass = document.getElementById('gp');
+  const gateBtn = document.getElementById('gbtn');
+  const gateErr = document.getElementById('gerr');
+
+  let authToken = '';
+  // 无痕模式 / 隐私设置可能直接禁掉 localStorage，读不到就当没登录过，别让整页崩掉
+  try { authToken = localStorage.getItem(AUTH_KEY) || ''; } catch (_) { /* 忽略 */ }
+
+  /** btoa 只吃 Latin-1，密码里一旦有中文就抛异常，先按 UTF-8 转成字节。 */
+  function b64(s) {
+    const bytes = new TextEncoder().encode(s);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
+  function forget() {
+    authToken = '';
+    try { localStorage.removeItem(AUTH_KEY); } catch (_) { /* 忽略 */ }
+  }
+
+  function showGate(msg) {
+    gateErr.textContent = msg || '';
+    gateEl.hidden = false;
+    // 只在桌面自动聚焦：手机上聚焦会立刻顶起键盘，把整个表单顶出视口
+    if (!/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) gateUser.focus();
+  }
+
+  /**
+   * 所有 API 请求的统一出口。
+   * 401 就地处理：清掉失效凭证、亮登录层、抛 UNAUTHORIZED。
+   * 调用方只要别把 UNAUTHORIZED 当成「网络故障」渲染成红字就行。
+   */
+  async function api(url, opts) {
+    const o = Object.assign({ cache: 'no-store' }, opts || {});
+    o.headers = Object.assign({}, o.headers || {});
+    if (authToken) o.headers['Authorization'] = 'Basic ' + authToken;
+    const res = await fetch(url, o);
+    if (res.status === 401) {
+      forget();
+      showGate('请先登录');
+      throw new Error('UNAUTHORIZED');
+    }
+    return res;
+  }
+
+  gateForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const u = gateUser.value.trim();
+    const p = gatePass.value;
+    if (!u) { gateErr.textContent = '请输入账号'; gateUser.focus(); return; }
+    gateBtn.disabled = true;
+    gateBtn.textContent = '验证中…';
+    gateErr.textContent = '';
+    const token = b64(u + ':' + p);
+    try {
+      // 先拿 /api/status 试一次再落盘：否则错密码也会被存下来，
+      // 下次打开要先失败一次才弹框，看起来像「页面坏了」。
+      const res = await fetch('/api/status', {
+        cache: 'no-store', headers: { Authorization: 'Basic ' + token }
+      });
+      if (!res.ok) { gateErr.textContent = '账号或密码不对'; return; }
+      authToken = token;
+      try { localStorage.setItem(AUTH_KEY, token); } catch (_) { /* 忽略 */ }
+      gatePass.value = '';
+      gateEl.hidden = true;
+      start();
+    } catch (_) {
+      gateErr.textContent = '连不上服务器，检查网络后重试';
+    } finally {
+      gateBtn.disabled = false;
+      gateBtn.textContent = '进入';
+    }
+  });
 
   let maxId = 0;            // 增量游标：全局最大 id，由服务端给
   let minId = 0;            // 翻页游标：列表里最旧一条的 id
@@ -330,8 +447,8 @@
     if (!n) return;
     setAna(li, '<span class="spin"></span><span class="note">模型分析中…</span>');
     try {
-      const res = await fetch('/api/news/' + id + '/analyze',
-          { method: 'POST', cache: 'no-store', signal: timeoutSignal(40000) });
+      const res = await api('/api/news/' + id + '/analyze',
+          { method: 'POST', signal: timeoutSignal(40000) });
       const data = await res.json().catch(() => ({}));
 
       if (res.status === 409) {
@@ -344,6 +461,7 @@
 
       applyItem(data.item);
     } catch (e) {
+      if (e.message === 'UNAUTHORIZED') return;   // 登录层已经盖上，别再往行里写红字
       const timeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
       const msg = timeout ? '等待超时，稍后自动取结果' : (e.message || '请求失败');
       setAna(li, '<span class="note err">' + esc(msg) + '</span>' +
@@ -356,7 +474,7 @@
   /** 拉单条最新状态。用于「别人正在分析」「请求超时」这两条兜底路径。 */
   async function refreshOne(id) {
     try {
-      const res = await fetch('/api/news/' + id, { cache: 'no-store' });
+      const res = await api('/api/news/' + id);
       if (!res.ok) return;
       applyItem(await res.json());
     } catch (_) { /* 网络抖动就等下一轮 */ }
@@ -373,8 +491,7 @@
     const ids = [...listEl.children].map(li => li.dataset.id).filter(Boolean);
     if (!ids.length) return;
     try {
-      const res = await fetch('/api/analysis/state?ids=' + ids.slice(0, 120).join(','),
-          { cache: 'no-store' });
+      const res = await api('/api/analysis/state?ids=' + ids.slice(0, 120).join(','));
       if (!res.ok) return;
       const data = await res.json();
       const items = data.items || {};
@@ -402,7 +519,7 @@
       const url = isInitial
           ? '/api/news?limit=' + PAGE
           : '/api/news?since=' + maxId + '&limit=200';
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await api(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
 
@@ -444,6 +561,8 @@
       if (typeof data.maxId === 'number') maxId = data.maxId;
       syncStates();
     } catch (e) {
+      // 401 已经由 api() 弹了登录层，这里再写「连接失败」只会误导人
+      if (e.message === 'UNAUTHORIZED') return;
       liveEl.className = 'dot err';
       lastEl.textContent = '连接失败';
       lastEl.title = e.message;
@@ -461,7 +580,7 @@
     loadingMore = true;
     setMore('loading');
     try {
-      const res = await fetch('/api/news?before=' + minId + '&limit=' + PAGE, { cache: 'no-store' });
+      const res = await api('/api/news?before=' + minId + '&limit=' + PAGE);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       const items = data.items || [];
@@ -525,8 +644,18 @@
   });
   document.getElementById('refresh').addEventListener('click', () => pull(true));
 
-  pull(false);
-  setInterval(() => pull(false), 30000);
+  // 启动：存过凭证就直接进（凭证失效的话第一轮请求会 401，自动弹登录层）；
+  // 没存过就先给登录框。登录成功后会再调一次 start()，由 started 挡住重复轮询。
+  let started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    gateEl.hidden = true;
+    pull(false);
+    setInterval(() => pull(false), 30000);
+  }
+
+  if (authToken) start(); else showGate();
 })();
 </script>
 </body>

@@ -37,6 +37,21 @@ public class BasicAuthFilter extends OncePerRequestFilter {
     private static final Logger log = LoggerFactory.getLogger(BasicAuthFilter.class);
     private static final String REALM = "cls-news";
 
+    /**
+     * 页面本身必须放行。
+     *
+     * <p>移动端浏览器（微信、QQ、UC 的内置内核，以及不少 Android WebView）收到
+     * 401 + {@code WWW-Authenticate} 之后**不会弹出原生输入框**，而是直接把 401
+     * 渲染成一张白底页面 —— 电脑上一切正常，同事用手机点开只看到「需要登录」三个字。
+     *
+     * <p>所以改成由页面自己收凭证：HTML 先加载出来，登录框做在页面里，
+     * 输入后用 Base64 塞进 {@code Authorization} 头去打 /api/**。
+     *
+     * <p>代价是 index.html 本身免认证就能拿到 —— 它只是个空壳，所有数据都在
+     * /api/** 后面，泄露的只有标题和样式表。
+     */
+    private static final Set<String> PAGE_PATHS = Set.of("/", "/index.html");
+
     private final byte[] expected;
     private final Set<String> permitPaths;
 
@@ -67,7 +82,7 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         // /healthz/../api/status 会因为前缀是 /healthz 而被放行，然后交给下游做路径规范化——
         // 能不能挡住完全取决于 Tomcat 的实现，等于把安全交给别人的默认值。
         // 另外显式拒绝带 .. 或 // 的请求：规范化时机在不同容器/版本上不一致，不赌。
-        if (permitPaths.contains(uri) && !looksLikeTraversal(uri)) {
+        if ((permitPaths.contains(uri) || PAGE_PATHS.contains(uri)) && !looksLikeTraversal(uri)) {
             chain.doFilter(req, resp);
             return;
         }
@@ -87,7 +102,13 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         }
 
         resp.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-        resp.setHeader("WWW-Authenticate", "Basic realm=\"" + REALM + "\", charset=\"UTF-8\"");
+        // 只给「非 API」请求发 challenge。
+        // 加了这个头，部分浏览器（Safari 尤其明显）会在 fetch 拿到 401 之后
+        // 额外弹一个原生登录框盖在自己页面上，和页面内的登录层打架、输完还关不掉。
+        // 页面内的登录框不需要它；用 curl 调 /api/** 也不靠它。
+        if (!uri.startsWith("/api/")) {
+            resp.setHeader("WWW-Authenticate", "Basic realm=\"" + REALM + "\", charset=\"UTF-8\"");
+        }
         resp.setContentType("text/plain;charset=UTF-8");
         resp.getWriter().write("需要登录");
     }

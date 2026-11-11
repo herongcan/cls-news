@@ -64,12 +64,18 @@ ssh "$HOST" 'docker info' >/dev/null 2>&1 || die "Docker 装了但没运行：ss
 # ---------- 3. 复用远端已有的 key ----------
 REMOTE_ENV="$REMOTE_DIR/.env"
 
-if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-  REMOTE_HAS_KEY="$(ssh "$HOST" "grep -q '^DEEPSEEK_API_KEY=sk-' $REMOTE_ENV 2>/dev/null && echo yes || echo no" 2>/dev/null || echo no)"
-  if [[ "$REMOTE_HAS_KEY" != "yes" ]]; then
+# 这里必须把远端 key 先读进本地变量，不能在「写 .env 的管道内部」才去取。
+# 踩过的坑：写 .env 用 `cat > $REMOTE_ENV`，这个重定向在 SSH 连接一建立就把远端文件
+# 截断了；如果取 key 的 `ssh grep $REMOTE_ENV` 放在同一个管道的 else 分支里，
+# 读到的一定是刚被清空的文件，于是 key 静默丢失、analysisReady 变 false，
+# 而脚本第 3 步的「远端已有 key」检查是在截断之前跑的、照样通过 —— 极难察觉。
+API_KEY="${DEEPSEEK_API_KEY:-}"
+if [[ -z "$API_KEY" ]]; then
+  API_KEY="$(ssh "$HOST" "sed -n 's/^DEEPSEEK_API_KEY=//p' $REMOTE_ENV 2>/dev/null | head -1" 2>/dev/null || true)"
+  if [[ -z "$API_KEY" ]]; then
     die "没有 DEEPSEEK_API_KEY，远端也没有。带上再跑：DEEPSEEK_API_KEY=sk-xxxx $0 $HOST"
   fi
-  say "沿用远端已有的 DEEPSEEK_API_KEY"
+  say "沿用远端已有的 DEEPSEEK_API_KEY（${#API_KEY} 字符）"
 fi
 
 # 访问密码固定 admin/admin（可用 APP_PASSWORD 覆盖）。
@@ -135,13 +141,16 @@ say "写入远端 .env"
   echo "MEM_LIMIT=$MEM_LIMIT"
   # 服务器只用运行镜像（见 deploy/cloud/Dockerfile.runtime 里的说明）
   echo "DOCKERFILE=deploy/cloud/Dockerfile.runtime"
-  if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
-    echo "DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
-  else
-    # 保留远端原有 key
-    ssh "$HOST" "grep '^DEEPSEEK_API_KEY=' $REMOTE_ENV 2>/dev/null" || true
-  fi
+  # key 已在上面读进 API_KEY（见第 3 步的注释），这里只负责写，不再回读远端文件
+  echo "DEEPSEEK_API_KEY=$API_KEY"
 } | ssh "$HOST" "cat > $REMOTE_ENV && chmod 600 $REMOTE_ENV"
+
+# 写后自检：不校验的话，key 丢了要等到有人点「分析」报 503 才发现
+WROTE_KEY_LEN="$(ssh "$HOST" "sed -n 's/^DEEPSEEK_API_KEY=//p' $REMOTE_ENV | head -1 | tr -d '\n' | wc -c" 2>/dev/null || echo 0)"
+if [[ "$WROTE_KEY_LEN" -lt 20 ]]; then
+  die "远端 .env 里的 DEEPSEEK_API_KEY 异常（长度 ${WROTE_KEY_LEN}），分析功能会不可用"
+fi
+say "远端 .env 已写入，key 长度 ${WROTE_KEY_LEN}"
 
 # ---------- 6. 构建并启动 ----------
 say "构建镜像并启动（运行镜像只拉 JRE，不跑 Maven）"

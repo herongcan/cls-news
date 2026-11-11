@@ -43,7 +43,12 @@
   li.new{animation:flash 2.2s ease-out}
   @keyframes flash{0%{background:rgba(217,164,65,.10)}100%{background:transparent}}
   .time{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;
-        padding-top:2px;display:flex;flex-direction:column;gap:5px}
+        padding-top:2px;display:flex;flex-direction:column;gap:5px;align-items:flex-start}
+  /* 时间两行：上行时分秒、下行日期。竖着排是为了不撑宽那 56px 的窄列，
+     同时保证翻到前几天时一眼能看出是哪天（只给 HH:mm 的话跨日完全瞎） */
+  .time .stack{display:flex;flex-direction:column;line-height:1.3}
+  .time .dd{font-size:10px;color:var(--dim);opacity:.72;letter-spacing:.02em}
+  .time .dd.today{opacity:.9;color:var(--amber)}
   .lv{font-size:10px;line-height:1.4;text-align:center;border-radius:3px;
       padding:0 4px;width:fit-content;border:.5px solid var(--line-2);color:var(--dim)}
   .lv.a{color:var(--amber);border-color:rgba(217,164,65,.45)}
@@ -289,6 +294,52 @@
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
+  /** 本地日期键 YYYY-MM-DD。用于判断「是不是同一天」，不依赖浏览器时区实现细节。 */
+  function dayKey(d) {
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  /**
+   * 时间列第二行的日期标签。
+   *
+   * <p>列表是瀑布流，一直往下翻能翻到几天前，只给 HH:mm 会完全失去日期感
+   * —— 昨天 18:30 和今天 18:30 长得一模一样。
+   *
+   * <p>分级显示是为了在 56px 的窄列里塞下又不啰嗦：
+   * 今天/昨天用词，今年内省掉年份，跨年才把年份补上。
+   */
+  function fmtDay(sec) {
+    const d = new Date(sec * 1000);
+    const now = new Date();
+    const key = dayKey(d);
+    if (key === dayKey(now)) return { text: '今天', today: true };
+    const y = new Date(now.getTime());
+    y.setDate(y.getDate() - 1);
+    if (key === dayKey(y)) return { text: '昨天', today: false };
+    const md = (d.getMonth() + 1) + '/' + d.getDate();
+    if (d.getFullYear() === now.getFullYear()) return { text: md, today: false };
+    // 跨年：25/11/10。两位年份够用且不撑破列宽，完整年份留给 hover
+    return { text: String(d.getFullYear()).slice(2) + '/' + md, today: false };
+  }
+
+  /** hover 提示用完整时间。日期标签做了省略，这里必须给全。 */
+  function fullTs(sec) {
+    const d = new Date(sec * 1000);
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+        ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  /** 顶栏用的短时间戳：今天只给时分，非今天补日期。页面开着过夜也不会误读成今天。 */
+  function stampShort(sec) {
+    const day = fmtDay(sec);
+    const d = new Date(sec * 1000);
+    const p = n => String(n).padStart(2, '0');
+    const hm = p(d.getHours()) + ':' + p(d.getMinutes());
+    return day.today ? hm : day.text + ' ' + hm;
+  }
+
   /** 结论部分：方向 + 置信度 + 一句话理由。没有分析结果时返回空串。 */
   function pillHtml(a) {
     if (!a) return '';
@@ -352,8 +403,13 @@
         ? '<span class="lv a">' + lv + '</span>' : '';
     const stocks = (n.stocks || []).map(stockChip).join('');
 
+    const day = fmtDay(n.time);
     li.innerHTML =
-      '<div class="time">' + hhmmss(n.time) + lvHtml + '</div>' +
+      '<div class="time" title="' + fullTs(n.time) + '">' +
+        '<span class="stack">' +
+          '<span class="hh">' + hhmmss(n.time) + '</span>' +
+          '<span class="dd' + (day.today ? ' today' : '') + '">' + day.text + '</span>' +
+        '</span>' + lvHtml + '</div>' +
       '<div>' +
         '<p class="txt"><a class="title" href="' + esc(n.url) + '" target="_blank" rel="noopener">'
           + esc(n.text) + '</a></p>' +
@@ -400,7 +456,7 @@
       lastEl.title = st.lastError;
     } else if (st.lastRunAt) {
       liveEl.className = 'dot ok';
-      lastEl.textContent = '最近抓取 ' + hhmmss(st.lastRunAt);
+      lastEl.textContent = '最近抓取 ' + stampShort(st.lastRunAt);
       lastEl.title = '';
     }
   }

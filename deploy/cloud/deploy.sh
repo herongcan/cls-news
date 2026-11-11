@@ -50,7 +50,7 @@ fi
 # ---------- 1. 连通性 ----------
 say "检查 SSH 连通性 $HOST"
 ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" 'echo ok' >/dev/null 2>&1 \
-  || die "连不上 $HOST。确认 IP、SSH 密钥已配置（ssh-copy-id）、安全组放行了 22 端口。"
+  || die "连不上 ${HOST}：确认 IP、SSH 密钥已配置（ssh-copy-id）、安全组放行了 22 端口。"
 
 # ---------- 2. 远端 Docker ----------
 if ! ssh "$HOST" 'command -v docker' >/dev/null 2>&1; then

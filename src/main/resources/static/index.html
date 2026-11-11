@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>财联社电报 · 实时</title>
+<link rel="icon" href="data:,">
 <style>
   :root{
     --bg:#0a0b0d; --panel:#101216; --line:#1e2128; --line-2:#2a2e37;
@@ -47,7 +48,12 @@
   a.title:hover{border-bottom-color:var(--line-2)}
   .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
   .chip{font-size:11px;color:var(--muted);border:.5px solid var(--line-2);
-        border-radius:4px;padding:1px 6px}
+        border-radius:4px;padding:1px 6px;display:inline-flex;align-items:center;gap:4px;
+        text-decoration:none;transition:border-color .15s,color .15s,background .15s}
+  /* 只有能跳转的才给 hover 反馈，不可点的保持静态，避免误导 */
+  a.chip:hover{border-color:#3b414c;color:var(--text);background:rgba(255,255,255,.03)}
+  .chip .code{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+  a.chip:hover .code{color:var(--muted)}
   .ana{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
   .pill{font-size:11px;padding:1px 7px;border-radius:4px;border:.5px solid}
   .pill.up{color:var(--up);border-color:rgba(229,72,77,.45)}
@@ -55,6 +61,23 @@
   .pill.flat{color:var(--muted);border-color:var(--line-2)}
   .why{font-size:12px;color:var(--muted)}
   #empty{padding:60px 0;text-align:center;color:var(--dim);font-size:13px}
+  /* 瀑布流底部状态：三种态各自有颜色，用户不用猜是"卡住了"还是"到底了" */
+  #more{padding:22px 0;text-align:center;font-size:12px;color:var(--dim);
+        min-height:56px;transition:color .2s}
+  #more.on{color:var(--muted)}
+  #more.on::after{content:"";display:inline-block;width:12px;height:12px;margin-left:8px;
+                  vertical-align:-2px;border:1.5px solid var(--line-2);border-top-color:var(--muted);
+                  border-radius:50%;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #more.err{color:var(--up);cursor:pointer}
+  #more.end{color:var(--dim);padding:30px 0 10px}
+  #more.end::before{content:"";display:block;width:40px;height:.5px;
+                    background:var(--line-2);margin:0 auto 16px}
+  /* 首屏 10 条填不满一屏时滚不动，给一个明确的可点击入口，否则用户永远看不到更早的记录 */
+  #more.manual{color:var(--muted);cursor:pointer;text-decoration:underline;
+               text-underline-offset:4px;text-decoration-color:var(--line-2)}
+  #more.manual:hover{color:var(--text);text-decoration-color:#3b414c}
+  #sentinel{height:1px}
   footer{max-width:920px;margin:0 auto;padding:0 20px 40px;
          color:var(--dim);font-size:11px;line-height:1.8}
 </style>
@@ -77,15 +100,20 @@
 <main>
   <div id="empty">正在抓取首批数据…</div>
   <ul id="list"></ul>
+  <div id="more"></div>
+  <div id="sentinel"></div>
 </main>
 
 <footer>
   个人自用 · 内容版权归财联社所有，仅做本地研究，不对外转载<br>
-  服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量
+  服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量；
+  向下滚动自动加载更早的记录，点击股票标签可跳转行情页
 </footer>
 
 <script>
 (function () {
+  const PAGE = 10;          // 首屏和每次翻页的条数
+
   const listEl = document.getElementById('list');
   const emptyEl = document.getElementById('empty');
   const countEl = document.getElementById('count');
@@ -93,10 +121,17 @@
   const srcEl = document.getElementById('src');
   const liveEl = document.getElementById('live');
   const ivEl = document.getElementById('iv');
+  const moreEl = document.getElementById('more');
+  const sentinel = document.getElementById('sentinel');
 
-  let maxId = 0;
-  let firstLoad = true;
-  let busy = false;
+  let maxId = 0;            // 增量游标：全局最大 id，由服务端给
+  let minId = 0;            // 翻页游标：列表里最旧一条的 id
+  let firstLoad = true;     // 首屏还没拿到数据时为 true
+  let hasMore = true;       // 往下还有没有历史
+  let polling = false;      // 增量请求进行中
+  let loadingMore = false;  // 翻页请求进行中
+  let paging = false;       // 是否已经向下翻过历史
+  let touched = false;      // 用户是否真的滚动过（用来守住「首屏只 10 条」）
 
   const esc = s => String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -119,16 +154,26 @@
     return '<div class="ana"><span class="pill ' + cls + '">' + label + conf + '</span>' + why + '</div>';
   }
 
+  // 东方财富行情页：实测 sh/sz/bj 前缀的个股与指数都能直接打开。
+  // 代码格式先过正则再拼 URL，避免把库里的脏数据拼成 href 注入页面。
+  function stockChip(s) {
+    const name = esc(s.name);
+    const code = s.code ? esc(s.code) : '';
+    const ok = /^(sh|sz|bj)\d{6}$/.test(s.code || '');
+    const label = name + (code ? '<span class="code">' + code + '</span>' : '');
+    if (!ok) return '<span class="chip">' + label + '</span>';
+    return '<a class="chip" href="https://quote.eastmoney.com/' + esc(s.code) + '.html"' +
+           ' target="_blank" rel="noopener noreferrer"' +
+           ' title="' + name + ' ' + code + ' · 查看行情">' + label + '</a>';
+  }
+
   function render(n, isNew) {
     const li = document.createElement('li');
     if (isNew) li.className = 'new';
     const lv = (n.level || '').toUpperCase();
     const lvHtml = (lv === 'A' || lv === 'B')
         ? '<span class="lv a">' + lv + '</span>' : '';
-
-    const stocks = (n.stocks || []).map(s =>
-        '<span class="chip">' + esc(s.name) + (s.code ? ' ' + esc(s.code) : '') + '</span>'
-    ).join('');
+    const stocks = (n.stocks || []).map(stockChip).join('');
 
     li.innerHTML =
       '<div class="time">' + hhmmss(n.time) + lvHtml + '</div>' +
@@ -157,14 +202,35 @@
     }
   }
 
+  function setMore(state, msg) {
+    if (state === 'loading') {
+      moreEl.className = 'on';
+      moreEl.textContent = '加载更早的记录';
+    } else if (state === 'end') {
+      moreEl.className = 'end';
+      moreEl.textContent = '没有更多了';
+    } else if (state === 'error') {
+      moreEl.className = 'err';
+      moreEl.textContent = '加载失败，点击重试';
+      moreEl.title = msg || '';
+    } else if (state === 'manual') {
+      moreEl.className = 'manual';
+      moreEl.textContent = '加载更早的记录';
+    } else {
+      moreEl.className = '';
+      moreEl.textContent = '';
+      moreEl.title = '';
+    }
+  }
+
   async function pull(manual) {
-    if (busy) return;
-    busy = true;
+    if (polling) return;
+    polling = true;
     try {
       const isInitial = firstLoad;
       const url = isInitial
-          ? '/api/news?limit=100'
-          : '/api/news?since=' + maxId + '&limit=100';
+          ? '/api/news?limit=' + PAGE
+          : '/api/news?since=' + maxId + '&limit=200';
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
@@ -176,16 +242,31 @@
         listEl.innerHTML = '';
         items.forEach(n => listEl.appendChild(render(n, false)));
         if (items.length) {
-          firstLoad = false;      // 库还是空的就继续走全量，避免 since=0 打乱顺序
+          firstLoad = false;
+          minId = items[items.length - 1].id;   // 倒序返回，最后一条最旧
+          hasMore = data.hasMore !== false;
           emptyEl.style.display = 'none';
+          setMore(hasMore ? 'idle' : 'end');
+          // 等一拍再看 10 条有没有把视口填满（布局完成才能量准高度）
+          if (hasMore) setTimeout(maybePromptMore, 350);
         } else {
           emptyEl.textContent = '本地库还是空的，等第一轮抓取…';
         }
       } else if (items.length) {
         // 增量按发布时间升序返回，逐个插到最前面 → 最新的自然在最上
+        const prevH = document.documentElement.scrollHeight;
+        const prevY = window.scrollY;
         items.forEach(n => listEl.insertBefore(render(n, true), listEl.firstChild));
-        const cap = 300;
-        while (listEl.children.length > cap) listEl.removeChild(listEl.lastChild);
+        if (!paging) {
+          const cap = 500;
+          while (listEl.children.length > cap) listEl.removeChild(listEl.lastChild);
+        }
+        // 用户已经往下翻历史时插入顶部，页面内容会整体下移，像「自己滚了一下」。
+        // 按高度差把滚动位置补回去，视口里那一行就不会跳。
+        if (prevY > 60) {
+          const delta = document.documentElement.scrollHeight - prevH;
+          if (delta > 0) window.scrollTo(0, prevY + delta);
+        }
       }
 
       if (typeof data.maxId === 'number') maxId = data.maxId;
@@ -195,10 +276,72 @@
       lastEl.title = e.message;
       if (manual) liveEl.className = 'dot warn';
     } finally {
-      busy = false;
+      polling = false;
     }
   }
 
+  async function loadMore(force) {
+    if (loadingMore || !hasMore || firstLoad || minId <= 0) return;
+    // 首屏就是 10 条：用户没滚动过就不自动补页，
+    // 否则屏幕高一点观察器立刻命中，首屏会一次刷出 20 条，10 这个数字就失效了。
+    if (!paging && !touched && !force) return;
+    loadingMore = true;
+    setMore('loading');
+    try {
+      const res = await fetch('/api/news?before=' + minId + '&limit=' + PAGE, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const items = data.items || [];
+      if (items.length) {
+        const frag = document.createDocumentFragment();
+        items.forEach(n => frag.appendChild(render(n, false)));
+        listEl.appendChild(frag);
+        minId = items[items.length - 1].id;   // 倒序返回，最后一条最旧
+        paging = true;
+        applyStats(data.stats);
+      }
+      hasMore = data.hasMore === true && items.length > 0;
+      setMore(hasMore ? 'idle' : 'end');
+    } catch (e) {
+      setMore('error', e.message);
+    } finally {
+      loadingMore = false;
+    }
+  }
+
+  /**
+   * 首屏渲染后量一次：10 条到底把视口填满了没有？
+   *
+   * 填满 → 用户能往下滚，交给 IntersectionObserver 自动加载；
+   * 没填满 → 页面根本没有滚动条，哨兵一直「可见」，观察器不会从不可见变可见，
+   *          永远不会再次触发。这种情况必须给一个可点的入口，否则更早的记录永远拿不到。
+   */
+  function maybePromptMore() {
+    if (!hasMore || firstLoad || paging || loadingMore) return;
+    if (sentinel.getBoundingClientRect().top <= window.innerHeight) setMore('manual');
+  }
+
+  // 滚动是主路径：既记录「用户真的滚动过」（放开自动补页的许可），也兜底触发加载。
+  // 为什么不能只靠 IntersectionObserver：它只在「进入视口」那一刻回调，
+  // 如果那一次因为 touched 还没置上被 loadMore 拦掉，哨兵会一直停在可见区，
+  // 观察器再也不会触发，页面就永远卡在首屏 10 条。
+  window.addEventListener('scroll', () => {
+    if (!touched && window.scrollY > 120) touched = true;
+    if (hasMore && !firstLoad && sentinel.getBoundingClientRect().top <= window.innerHeight + 300) {
+      loadMore();
+    }
+  }, { passive: true });
+
+  // 观察器只作快速通道：刚滚到附近就提前取下一页，不用等到下一次 scroll 事件
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) loadMore();
+    }, { rootMargin: '300px 0px' }).observe(sentinel);
+  }
+
+  moreEl.addEventListener('click', () => {
+    if (moreEl.className === 'err' || moreEl.className === 'manual') loadMore(true);
+  });
   document.getElementById('refresh').addEventListener('click', () => pull(true));
 
   pull(false);

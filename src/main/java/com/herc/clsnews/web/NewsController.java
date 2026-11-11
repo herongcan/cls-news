@@ -45,22 +45,40 @@ public class NewsController {
     }
 
     /**
-     * 列表接口。两种用法：
-     *   GET /api/news                 首屏，按发布时间倒序
-     *   GET /api/news?since=12345     增量，返回 id 更新的条目（升序）
+     * 列表接口。三种用法：
+     *   GET /api/news                      首屏，按发布时间倒序，默认 10 条
+     *   GET /api/news?since=12345          增量，返回 id 更大的条目（升序）
+     *   GET /api/news?before=12345         向下翻历史，返回 id 更小的条目（倒序）
+     *
+     * <p>since 与 before 互斥，同时给时 since 优先 —— 增量永远比翻历史更紧急。
      */
     @GetMapping("/news")
-    public Map<String, Object> news(@RequestParam(defaultValue = "100") int limit,
-                                    @RequestParam(defaultValue = "0") long since) {
+    public Map<String, Object> news(@RequestParam(defaultValue = "10") int limit,
+                                    @RequestParam(defaultValue = "0") long since,
+                                    @RequestParam(defaultValue = "0") long before) {
         int n = Math.max(1, Math.min(limit, 200));
-        List<News> rows = since > 0 ? store.since(since, n) : store.latest(n);
+        List<News> rows;
+        boolean hasMore;
+        if (since > 0) {
+            // 增量不分页：积压多少一次取走，免得前端还要循环追
+            rows = store.since(since, n);
+            hasMore = false;
+        } else if (before > 0) {
+            rows = store.before(before, n);
+            // 只有取满一页才可能还有；不满一页说明到底了
+            hasMore = rows.size() >= n && store.countBefore(before) > rows.size();
+        } else {
+            rows = store.latest(n);
+            hasMore = store.count() > rows.size();
+        }
         List<NewsView> items = rows.stream().map(this::toView).toList();
 
-        // 游标用全局最大 id，而不是本页最大值：首屏只取 100 条时，
+        // 游标用全局最大 id，而不是本页最大值：首屏只取 10 条时，
         // 本页最大值可能小于库里真实最大值，下一轮会把已展示的条目当新增再发一遍。
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("items", items);
         body.put("maxId", store.maxId());
+        body.put("hasMore", hasMore);
         body.put("serverTime", Instant.now().getEpochSecond());
         body.put("stats", stats());
         return body;

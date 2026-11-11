@@ -49,6 +49,24 @@ public class NewsStore {
                 "SELECT * FROM news WHERE id > ? ORDER BY publish_time ASC, id ASC LIMIT ?", MAP, sinceId, limit);
     }
 
+    /**
+     * 向下翻历史：取 id 小于游标的一页，保持「新的在上」的倒序。
+     *
+     * <p>游标用 id 而不是 publish_time，因为入库前已按发布时间升序排过，
+     * id 与时间严格同序；而 publish_time 可能重复（同一秒多条快讯），
+     * 用它翻页会在边界漏条或重条。
+     */
+    public List<News> before(long beforeId, int limit) {
+        return jdbc.query(
+                "SELECT * FROM news WHERE id < ? ORDER BY publish_time DESC, id DESC LIMIT ?", MAP, beforeId, limit);
+    }
+
+    /** 游标之前还有多少条，用来判断要不要继续显示「加载更多」。 */
+    public long countBefore(long beforeId) {
+        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM news WHERE id < ?", Long.class, beforeId);
+        return n == null ? 0 : n;
+    }
+
     /** 全局最大 id，作为前端增量游标。用全局值而不是「本页最大值」，避免分页边界重复。 */
     public long maxId() {
         Long n = jdbc.queryForObject("SELECT COALESCE(MAX(id), 0) FROM news", Long.class);

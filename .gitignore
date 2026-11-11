@@ -11,3 +11,7 @@ data/*.db-shm
 .env
 deploy/laptop/config.env
 logs/
+
+# 评测产物：人工标注是本地判断（含个人观点），不进仓库
+tools/eval/labels.csv
+tools/eval/answers.csv

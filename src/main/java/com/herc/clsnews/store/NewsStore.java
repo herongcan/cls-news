@@ -102,6 +102,51 @@ public class NewsStore {
                 """, MAP, limit);
     }
 
+    /**
+     * 单条原子认领。手动分析用，等价于 {@link #claimPending} 的「抢一条」版本。
+     *
+     * <p>为什么条件写 {@code analysis_status <> 'analyzing'} 而不是 {@code = 'pending'}：
+     * 手动模式下用户会主动点「重新分析」，已 done 的行必须允许重算；
+     * 唯一要挡的是「已经有人在算」，否则两个人同时点同一条就是两次扣费。
+     *
+     * <p>返回空 Optional 有两种可能：id 不存在、或已被别的请求抢走 ——
+     * 调用方统一按「正在分析中」处理即可。
+     */
+    public Optional<News> claimOne(long id) {
+        return jdbc.query("""
+                UPDATE news SET analysis_status = 'analyzing'
+                WHERE id = ? AND analysis_status <> 'analyzing'
+                RETURNING *
+                """, MAP, id).stream().findFirst();
+    }
+
+    /** 记一次真实的大模型调用。日配额按这个数算，因为它才是钱。 */
+    public void recordCall(long newsId) {
+        jdbc.update("INSERT INTO analysis_call (ts, news_id) VALUES (?,?)",
+                Instant.now().getEpochSecond(), newsId);
+    }
+
+    /** 今天已经调用过多少次模型。跨重启准确，多实例共享同一份计数。 */
+    public long countCallsSince(long epochSecond) {
+        Long n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM analysis_call WHERE ts >= ?", Long.class, epochSecond);
+        return n == null ? 0 : n;
+    }
+
+    /** 清掉老的调用记录，避免这张表无限长。启动时跑一次就够。 */
+    public int pruneCalls(long beforeEpochSecond) {
+        return jdbc.update("DELETE FROM analysis_call WHERE ts < ?", beforeEpochSecond);
+    }
+
+    /** 按 id 批量查，给「同步已展示条目的分析状态」用。顺序不保证，调用方按 id 自己索引。 */
+    public List<News> findByIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        return jdbc.query("SELECT * FROM news WHERE id IN (" + placeholders + ")", MAP, ids.toArray());
+    }
+
     /** 上次进程被杀/崩溃时留下的 analyzing 行，启动时打回 pending，否则这些条目永远卡住。 */
     public int resetStuck() {
         return jdbc.update("UPDATE news SET analysis_status='pending' WHERE analysis_status='analyzing'");

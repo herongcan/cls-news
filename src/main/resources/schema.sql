@@ -22,3 +22,14 @@ CREATE TABLE IF NOT EXISTS news (
 
 CREATE INDEX IF NOT EXISTS idx_news_publish ON news (publish_time DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_news_status  ON news (analysis_status);
+
+-- 每次真正调用大模型记一行。
+-- 为什么不直接数 news.analyzed_at：同一行可以被「重新分析」多次，按行计数永远到不了上限，
+-- 而钱是一次一次花的。日配额必须按调用次数算，否则这个上限只是给人看的。
+CREATE TABLE IF NOT EXISTS analysis_call (
+    id      INTEGER PRIMARY KEY,
+    ts      INTEGER NOT NULL,                         -- epoch 秒
+    news_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_ts ON analysis_call (ts);

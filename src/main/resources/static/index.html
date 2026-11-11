@@ -54,12 +54,25 @@
   a.chip:hover{border-color:#3b414c;color:var(--text);background:rgba(255,255,255,.03)}
   .chip .code{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
   a.chip:hover .code{color:var(--muted)}
-  .ana{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+  /* min-height 用来占位：从「分析」按钮变成结论时行高不变，列表不会往下抖 */
+  .ana{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;min-height:22px}
   .pill{font-size:11px;padding:1px 7px;border-radius:4px;border:.5px solid}
   .pill.up{color:var(--up);border-color:rgba(229,72,77,.45)}
   .pill.down{color:var(--down);border-color:rgba(47,166,106,.45)}
   .pill.flat{color:var(--muted);border-color:var(--line-2)}
   .why{font-size:12px;color:var(--muted)}
+  /* 分析按钮：默认低调，hover 才亮，避免整页都是按钮抢走新闻本身的注意力 */
+  button.act{font-size:11px;padding:1px 8px;border-radius:4px;line-height:1.7;
+             display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+  button.act:hover{background:rgba(255,255,255,.03)}
+  button.act:disabled{opacity:.55;cursor:default;border-color:var(--line-2)}
+  button.act.ghost{border-color:transparent;color:var(--dim)}
+  button.act.ghost:hover{border-color:var(--line-2);color:var(--text)}
+  button.act.err{color:var(--up);border-color:rgba(229,72,77,.4)}
+  .spin{width:10px;height:10px;flex:none;display:inline-block;border:1.5px solid var(--line-2);
+        border-top-color:var(--muted);border-radius:50%;animation:spin .7s linear infinite}
+  .note{font-size:11px;color:var(--dim)}
+  .note.err{color:var(--up)}
   #empty{padding:60px 0;text-align:center;color:var(--dim);font-size:13px}
   /* 瀑布流底部状态：三种态各自有颜色，用户不用猜是"卡住了"还是"到底了" */
   #more{padding:22px 0;text-align:center;font-size:12px;color:var(--dim);
@@ -92,6 +105,8 @@
   <div class="meta">
     <span>已收录 <b id="count">0</b> 条</span>
     <span>·</span>
+    <span id="anaToday">今日调用 0</span>
+    <span>·</span>
     <span id="last">等待首次抓取</span>
     <button id="refresh">立即刷新</button>
   </div>
@@ -107,7 +122,8 @@
 <footer>
   个人自用 · 内容版权归财联社所有，仅做本地研究，不对外转载<br>
   服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量；
-  向下滚动自动加载更早的记录，点击股票标签可跳转行情页
+  向下滚动自动加载更早的记录，点击股票标签可跳转行情页<br>
+  大模型分析为手动触发：点「分析」才调用，同一条 90 秒内重复点会直接返回上次结果、不重复计费
 </footer>
 
 <script>
@@ -123,6 +139,7 @@
   const ivEl = document.getElementById('iv');
   const moreEl = document.getElementById('more');
   const sentinel = document.getElementById('sentinel');
+  const anaTodayEl = document.getElementById('anaToday');
 
   let maxId = 0;            // 增量游标：全局最大 id，由服务端给
   let minId = 0;            // 翻页游标：列表里最旧一条的 id
@@ -132,6 +149,10 @@
   let loadingMore = false;  // 翻页请求进行中
   let paging = false;       // 是否已经向下翻过历史
   let touched = false;      // 用户是否真的滚动过（用来守住「首屏只 10 条」）
+
+  // id -> 条目原始数据。点击分析后要用它做增量更新，
+  // 而不是靠读 DOM 反推——DOM 里已经没有了原始字段。
+  const itemsById = new Map();
 
   const esc = s => String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -143,7 +164,8 @@
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
-  function sentimentPill(a) {
+  /** 结论部分：方向 + 置信度 + 一句话理由。没有分析结果时返回空串。 */
+  function pillHtml(a) {
     if (!a) return '';
     const s = a.sentiment || 'neutral';
     const cls = s === 'bullish' ? 'up' : s === 'bearish' ? 'down' : 'flat';
@@ -151,7 +173,31 @@
     const conf = typeof a.confidence === 'number'
         ? ' ' + Math.round(a.confidence * 100) + '%' : '';
     const why = a.summary ? '<span class="why">' + esc(a.summary) + '</span>' : '';
-    return '<div class="ana"><span class="pill ' + cls + '">' + label + conf + '</span>' + why + '</div>';
+    return '<span class="pill ' + cls + '">' + label + conf + '</span>' + why;
+  }
+
+  /**
+   * 操作区：三种态对应三种按钮。
+   * analyzing 必须显示「分析中」而不是可点的按钮 —— 否则用户会以为没生效，反复点。
+   */
+  function actionHtml(n) {
+    const st = n.analysisStatus || 'pending';
+    if (st === 'analyzing') {
+      return '<button class="act" disabled><span class="spin"></span>分析中</button>';
+    }
+    if (n.analysis) {
+      // 已有结论：只留一个很淡的「重新分析」，防止误触重复花钱
+      return '<button class="act ghost" data-act="analyze" data-force="1"' +
+             ' title="重新调用模型分析这条（会计费）">重新分析</button>';
+    }
+    if (st === 'failed') {
+      return '<button class="act err" data-act="analyze">重试分析</button>';
+    }
+    return '<button class="act" data-act="analyze">分析</button>';
+  }
+
+  function anaHtml(n) {
+    return pillHtml(n.analysis) + actionHtml(n);
   }
 
   // 东方财富行情页：实测 sh/sz/bj 前缀的个股与指数都能直接打开。
@@ -169,7 +215,9 @@
 
   function render(n, isNew) {
     const li = document.createElement('li');
+    li.dataset.id = n.id;
     if (isNew) li.className = 'new';
+    itemsById.set(n.id, n);
     const lv = (n.level || '').toUpperCase();
     const lvHtml = (lv === 'A' || lv === 'B')
         ? '<span class="lv a">' + lv + '</span>' : '';
@@ -181,9 +229,22 @@
         '<p class="txt"><a class="title" href="' + esc(n.url) + '" target="_blank" rel="noopener">'
           + esc(n.text) + '</a></p>' +
         (stocks ? '<div class="chips">' + stocks + '</div>' : '') +
-        sentimentPill(n.analysis) +
+        '<div class="ana" data-ana>' + anaHtml(n) + '</div>' +
       '</div>';
     return li;
+  }
+
+  /**
+   * 单条原地更新。分析结果回来只改这一行的分析区，
+   * 不重排整个列表 —— 重排会让用户正在读的位置跳走，也丢失其余行的瞬时状态。
+   */
+  function applyItem(item) {
+    if (!item || !item.id) return;
+    itemsById.set(item.id, item);
+    const li = listEl.querySelector('li[data-id="' + item.id + '"]');
+    if (!li) return;
+    const ana = li.querySelector('[data-ana]');
+    if (ana) ana.innerHTML = anaHtml(item);
   }
 
   function applyStats(st) {
@@ -191,6 +252,17 @@
     countEl.textContent = st.total != null ? st.total : 0;
     if (st.intervalMs) ivEl.textContent = Math.round(st.intervalMs / 1000);
     if (st.source) srcEl.textContent = st.source;
+    if (st.analyzedToday != null) {
+      anaTodayEl.textContent = '今日调用 ' + st.analyzedToday +
+          (st.analysisCap != null ? '/' + st.analysisCap : '');
+      if (st.analysisCapped) {
+        anaTodayEl.title = '今日分析已达上限，明天再试';
+        anaTodayEl.style.color = 'var(--amber)';
+      } else {
+        anaTodayEl.title = st.analysisAuto ? '后台自动分析' : '手动点击分析';
+        anaTodayEl.style.color = '';
+      }
+    }
     if (st.lastError) {
       liveEl.className = 'dot err';
       lastEl.textContent = '抓取失败，重试中';
@@ -223,6 +295,92 @@
     }
   }
 
+  // ---------- 分析（手动触发）----------
+
+  /** AbortSignal.timeout 在旧内核里没有，退回手写定时器 */
+  function timeoutSignal(ms) {
+    if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
+    const c = new AbortController();
+    setTimeout(() => c.abort(), ms);
+    return c.signal;
+  }
+
+  function setAna(li, html) {
+    const ana = li.querySelector('[data-ana]');
+    if (ana) ana.innerHTML = html;
+  }
+
+  async function doAnalyze(li, force) {
+    const id = Number(li.dataset.id);
+    const n = itemsById.get(id);
+    if (!n) return;
+    setAna(li, '<span class="spin"></span><span class="note">模型分析中…</span>');
+    try {
+      const res = await fetch('/api/news/' + id + '/analyze' + (force ? '?force=true' : ''),
+          { method: 'POST', cache: 'no-store', signal: timeoutSignal(40000) });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 409) {
+        // 同事正在分析同一条。不重复调用，等几秒直接取他要出来的那份结果。
+        setAna(li, '<span class="note">同事正在分析这条…</span>');
+        setTimeout(() => refreshOne(id), 3000);
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+
+      applyItem(data.item);
+    } catch (e) {
+      const timeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+      const msg = timeout ? '等待超时，稍后自动取结果' : (e.message || '请求失败');
+      setAna(li, '<span class="note err">' + esc(msg) + '</span>' +
+                 '<button class="act err" data-act="analyze"' + (force ? ' data-force="1"' : '') +
+                 '>重试</button>');
+      // 超时 ≠ 失败：服务端可能还在跑，几秒后回头查一次，别让用户白等一遍再重花钱
+      if (timeout) setTimeout(() => refreshOne(id), 6000);
+    }
+  }
+
+  /** 拉单条最新状态。用于「别人正在分析」「请求超时」这两条兜底路径。 */
+  async function refreshOne(id) {
+    try {
+      const res = await fetch('/api/news/' + id, { cache: 'no-store' });
+      if (!res.ok) return;
+      applyItem(await res.json());
+    } catch (_) { /* 网络抖动就等下一轮 */ }
+  }
+
+  /**
+   * 同步「已经渲染在屏幕上的条目」的分析状态。
+   *
+   * 为什么需要：增量轮询只拉 since=最大 id 的新条目，永远不会重看旧行。
+   * 10 个人共用一个账号时，同事分析了第 120 条，你屏幕上那条会一直空着，
+   * 看起来像「他那边能分析、我这边不行」。这里只传 id，不传正文，代价很小。
+   */
+  async function syncStates() {
+    const ids = [...listEl.children].map(li => li.dataset.id).filter(Boolean);
+    if (!ids.length) return;
+    try {
+      const res = await fetch('/api/analysis/state?ids=' + ids.slice(0, 120).join(','),
+          { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = data.items || {};
+      Object.keys(items).forEach(key => {
+        const id = Number(key);
+        const cur = itemsById.get(id);
+        const st = items[key];
+        if (!cur || !st) return;
+        if (cur.analysisStatus === st.status &&
+            JSON.stringify(cur.analysis || null) === JSON.stringify(st.analysis || null)) {
+          return;   // 没变，不动 DOM
+        }
+        applyItem(Object.assign({}, cur, { analysisStatus: st.status, analysis: st.analysis }));
+      });
+    } catch (_) { /* 静默失败：下一轮再说 */ }
+  }
+
+  // ---------- 列表 ----------
+
   async function pull(manual) {
     if (polling) return;
     polling = true;
@@ -240,6 +398,7 @@
       const items = data.items || [];
       if (isInitial) {
         listEl.innerHTML = '';
+        itemsById.clear();
         items.forEach(n => listEl.appendChild(render(n, false)));
         if (items.length) {
           firstLoad = false;
@@ -270,6 +429,7 @@
       }
 
       if (typeof data.maxId === 'number') maxId = data.maxId;
+      syncStates();
     } catch (e) {
       liveEl.className = 'dot err';
       lastEl.textContent = '连接失败';
@@ -338,6 +498,14 @@
       if (entries[0].isIntersecting) loadMore();
     }, { rootMargin: '300px 0px' }).observe(sentinel);
   }
+
+  // 分析按钮用事件委托：列表会不断插入新行，逐行绑定监听会随滚动累积一堆失效闭包
+  listEl.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act="analyze"]');
+    if (!btn || btn.disabled) return;
+    const li = btn.closest('li');
+    if (li) doAnalyze(li, btn.dataset.force === '1');
+  });
 
   moreEl.addEventListener('click', () => {
     if (moreEl.className === 'err' || moreEl.className === 'manual') loadMore(true);

@@ -1,0 +1,78 @@
+server:
+  port: 8080
+  compression:
+    enabled: true
+
+spring:
+  application:
+    name: cls-news
+  task:
+    scheduling:
+      pool:
+        # 默认只有 1 个线程：只要有一个任务阻塞（比如模型接口不返回），
+        # 采集也会跟着停。实测踩过这个坑，所以显式给 4 个大小线程池。
+        size: 4
+  datasource:
+    # 用环境变量是因为容器里挂载点是固定的 /app/data，本机是 ./data。
+    # 硬编码相对路径在容器里一旦忘了挂卷，重启就是空库，而且不会报错——只是数据没了。
+    url: jdbc:sqlite:${DB_PATH:./data/news.db}?journal_mode=WAL&busy_timeout=5000&synchronous=NORMAL
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      pool-name: sqlite-pool
+      maximum-pool-size: 4
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  jackson:
+    default-property-inclusion: non_null
+
+app:
+  # cls-api = 真实抓取；mock = 假数据（断网时看界面用）
+  source: cls-api
+
+  # 抓取间隔。财联社电报约 30 条/小时，90 秒一轮足够，且更礼貌
+  # 服务器上想调频不用改文件、重建镜像，改环境变量重启即可
+  interval-ms: ${INGEST_INTERVAL_MS:90000}
+  initial-delay-ms: 1500
+
+  display:
+    # 只自己看：true。要改公开口径时切 false（只返回摘要 + 原文链接）
+    fulltext: true
+
+  analysis:
+    # 大模型分析总开关。关掉之后一条都不会分析，采集照常
+    enabled: true
+    provider: deepseek    # deepseek | stub
+    daily-cap: 300
+
+    # key 取值顺序：这里 → 环境变量 DEEPSEEK_API_KEY → ~/.codex/auth.json
+    # 留空即可，不要写进这个文件（会进 git）
+    api-key: ${DEEPSEEK_API_KEY:}
+    base-url: https://api.deepseek.com
+    model: deepseek-flash   # 实测可用：deepseek-flash / deepseek-v4-pro
+    timeout-ms: 30000
+    temperature: 0.2
+    max-tokens: 2000
+
+  http:
+    timeout-ms: 12000
+    user-agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    referer: "https://www.cls.cn/telegraph"
+
+  # 访问控制。本机自己用可以关；一旦放到公网必须打开。
+  # 为什么必须：这个工具按「只自己看」的口径存了全文，无鉴权放到公网
+  # 等于做一个公开的财联社转贴站，版权风险是立刻兑现的，不是理论问题。
+  security:
+    enabled: ${APP_AUTH:false}
+    username: ${APP_USER:admin}
+    password: ${APP_PASSWORD:}
+    permit-paths:
+      - /healthz
+
+logging:
+  level:
+    com.herc.clsnews: INFO
+  pattern:
+    # 带日期：上线后日志要跨天留存，只有 HH:mm:ss 无法定位是哪天出的问题
+    console: "%d{yyyy-MM-dd HH:mm:ss} %-5level %-28logger{0} - %msg%n"

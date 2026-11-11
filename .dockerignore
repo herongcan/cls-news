@@ -1,0 +1,20 @@
+# 构建上下文只留源码和 pom，其余全部排除：
+# data 动辄几十 MB，传进 build context 会明显拖慢构建；
+# data 里是真实抓取数据，绝不能烤进镜像。
+#
+# 注意 target 的写法：不能写 `target/`，因为 Docker 的规则是
+# 「父目录被整体排除后，`!` 无法再把里面的文件救回来」。
+# 必须写成 `target/*` 排除子项，再用 `!` 单点放行那一个 jar。
+# deploy/cloud/Dockerfile.runtime 就是靠这个 jar 构建的，写错就报
+# "COPY target/cls-news-0.1.0.jar: not found"。
+target/*
+!target/cls-news-0.1.0.jar
+data/
+run.log
+run.sh
+.idea/
+.git/
+.DS_Store
+Dockerfile
+docker-compose*.yml
+*.md

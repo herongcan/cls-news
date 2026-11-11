@@ -1,0 +1,13 @@
+target/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+.idea/
+*.iml
+.DS_Store
+*.log
+
+# 里面有密码和 API key，绝不能提交
+.env
+deploy/laptop/config.env
+logs/

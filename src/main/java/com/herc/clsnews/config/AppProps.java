@@ -1,0 +1,115 @@
+package com.herc.clsnews.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+/**
+ * 全部可调参数集中在这里，对应 application.yml 的 app.* 。
+ * 刻意不做成数据库配置：这个阶段改配置就该改文件、重启，够用。
+ */
+@Component
+@ConfigurationProperties(prefix = "app")
+public class AppProps {
+
+    /** cls-api | mock */
+    private String source = "cls-api";
+    private long intervalMs = 90_000;
+    private long initialDelayMs = 1_500;
+
+    private final Display display = new Display();
+    private final Analysis analysis = new Analysis();
+    private final Http http = new Http();
+    private final Security security = new Security();
+
+    public String getSource() { return source; }
+    public void setSource(String source) { this.source = source; }
+
+    public long getIntervalMs() { return intervalMs; }
+    public void setIntervalMs(long intervalMs) { this.intervalMs = intervalMs; }
+
+    public long getInitialDelayMs() { return initialDelayMs; }
+    public void setInitialDelayMs(long initialDelayMs) { this.initialDelayMs = initialDelayMs; }
+
+    public Display getDisplay() { return display; }
+    public Analysis getAnalysis() { return analysis; }
+    public Http getHttp() { return http; }
+    public Security getSecurity() { return security; }
+
+    /**
+     * 访问控制。这个项目默认口径是「只自己看」，一旦放到公网就必须打开，
+     * 否则任何人知道地址都能看到转贴的全文，版权风险当场兑现。
+     */
+    public static class Security {
+        /** 关掉时完全不拦截（本机开发用）。上线必须 true */
+        private boolean enabled = false;
+        private String username = "admin";
+        /** 留空则启动时直接失败，不允许「以为开了其实没密码」 */
+        private String password = "";
+        /** 健康检查不能要密码，否则 Docker/负载均衡永远判死 */
+        private String[] permitPaths = {"/healthz"};
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getUsername() { return username; }
+        public void setUsername(String username) { this.username = username; }
+        public String getPassword() { return password; }
+        public void setPassword(String password) { this.password = password; }
+        public String[] getPermitPaths() { return permitPaths; }
+        public void setPermitPaths(String[] permitPaths) { this.permitPaths = permitPaths; }
+    }
+
+    public static class Display {
+        /** true = 返回正文（只自己看）；false = 只返回摘要，用于公开口径 */
+        private boolean fulltext = true;
+        public boolean isFulltext() { return fulltext; }
+        public void setFulltext(boolean fulltext) { this.fulltext = fulltext; }
+    }
+
+    public static class Analysis {
+        /** 总开关：false 时 AnalysisWorker 这个 Bean 都不创建，一条都不会分析 */
+        private boolean enabled = false;
+        /** stub = 空实现（调用必然失败，用于识别「还没接」）；deepseek = 真实调用 */
+        private String provider = "stub";
+        /** 每天最多分析多少条，防止配置错误把额度烧光 */
+        private int dailyCap = 300;
+        /** 留空则依次回落到环境变量 DEEPSEEK_API_KEY、~/.codex/auth.json */
+        private String apiKey = "";
+        private String baseUrl = "https://api.deepseek.com";
+        /** 实测可用：deepseek-flash / deepseek-v4-pro */
+        private String model = "deepseek-flash";
+        private int timeoutMs = 30_000;
+        private double temperature = 0.2;
+        private int maxTokens = 2000;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getProvider() { return provider; }
+        public void setProvider(String provider) { this.provider = provider; }
+        public int getDailyCap() { return dailyCap; }
+        public void setDailyCap(int dailyCap) { this.dailyCap = dailyCap; }
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getBaseUrl() { return baseUrl; }
+        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        public String getModel() { return model; }
+        public void setModel(String model) { this.model = model; }
+        public int getTimeoutMs() { return timeoutMs; }
+        public void setTimeoutMs(int timeoutMs) { this.timeoutMs = timeoutMs; }
+        public double getTemperature() { return temperature; }
+        public void setTemperature(double temperature) { this.temperature = temperature; }
+        public int getMaxTokens() { return maxTokens; }
+        public void setMaxTokens(int maxTokens) { this.maxTokens = maxTokens; }
+    }
+
+    public static class Http {
+        private int timeoutMs = 12_000;
+        private String userAgent;
+        private String referer;
+        public int getTimeoutMs() { return timeoutMs; }
+        public void setTimeoutMs(int timeoutMs) { this.timeoutMs = timeoutMs; }
+        public String getUserAgent() { return userAgent; }
+        public void setUserAgent(String userAgent) { this.userAgent = userAgent; }
+        public String getReferer() { return referer; }
+        public void setReferer(String referer) { this.referer = referer; }
+    }
+}

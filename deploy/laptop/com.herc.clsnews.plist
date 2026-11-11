@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent 模板。__PROJECT_DIR__ 由 install.sh 替换成真实路径。
+
+  为什么用 LaunchAgent 而不是 Docker：
+  笔记本上跑 Docker Desktop 要额外吃 2G 内存 + 一堆虚拟化开销，
+  而这个服务就是单个 jar + 一个 SQLite 文件，没必要多一层。
+  Docker 那套留给以后搬服务器用（Dockerfile / docker-compose.yml 都还在）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.herc.clsnews</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_DIR__/deploy/laptop/start.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <!-- 登录后自动拉起 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 崩了自动重启。配对 ThrottleInterval 防止配置错误时疯狂刷日志 -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/app.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/app.err.log</string>
+
+    <!-- 别让 launchd 在低电量时把它降优先级 -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

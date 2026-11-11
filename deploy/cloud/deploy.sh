@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+#
+# 一键部署到云服务器。
+#
+# 用法（首次）：
+#   DEEPSEEK_API_KEY=sk-xxxx ./deploy/cloud/deploy.sh root@1.2.3.4
+#
+# 用法（之后只更新代码，key 沿用远端已有的）：
+#   ./deploy/cloud/deploy.sh root@1.2.3.4
+#
+# 可覆盖的变量：
+#   REMOTE_DIR  远端目录，默认 /opt/cls-news
+#   HOST_PORT   宿主机端口，默认 8080
+#   APP_PASSWORD 访问密码；不传则沿用远端已有的，远端也没有就随机生成
+#
+set -euo pipefail
+
+HOST="${1:-}"
+if [[ -z "$HOST" ]]; then
+  cat >&2 <<'USAGE'
+用法：DEEPSEEK_API_KEY=sk-xxxx ./deploy/cloud/deploy.sh root@<公网IP>
+
+第一次必须带 DEEPSEEK_API_KEY（服务器上没有 ~/.codex/auth.json 可回落，
+不带的话分析功能会静默降级成「只采集不分析」）。
+USAGE
+  exit 1
+fi
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REMOTE_DIR="${REMOTE_DIR:-/opt/cls-news}"
+HOST_PORT="${HOST_PORT:-8080}"
+cd "$PROJECT_DIR"
+
+say() { printf '\033[36m[deploy]\033[0m %s\n' "$*"; }
+die() { printf '\033[31m[fatal]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------- 0. 本地构建 jar ----------
+# jar 在本地打，不交给 2核2G 的服务器去跑 Maven：
+# 那边内存不够会被 OOM killer 直接杀掉，日志里只有一句 Killed，很难查。
+JAR="target/cls-news-0.1.0.jar"
+export JAVA_HOME="${CLS_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
+if [[ ! -f "$JAR" ]] || [[ -n "$(find src pom.xml -newer "$JAR" -type f -print -quit 2>/dev/null)" ]]; then
+  say "本地打包（源码比 jar 新，或 jar 不存在）"
+  mvn -q -B -DskipTests package || die "本地构建失败，先把编译错误修掉"
+else
+  say "jar 是最新的，跳过构建"
+fi
+[[ -f "$JAR" ]] || die "构建后仍找不到 $JAR"
+
+# ---------- 1. 连通性 ----------
+say "检查 SSH 连通性 $HOST"
+ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" 'echo ok' >/dev/null 2>&1 \
+  || die "连不上 $HOST。确认 IP、SSH 密钥已配置（ssh-copy-id）、安全组放行了 22 端口。"
+
+# ---------- 2. 远端 Docker ----------
+if ! ssh "$HOST" 'command -v docker' >/dev/null 2>&1; then
+  die "远端没装 Docker。先执行 deploy/cloud/README.md 里的「装 Docker」一节。"
+fi
+
+say "检查远端 Docker 是否在跑"
+ssh "$HOST" 'docker info' >/dev/null 2>&1 || die "Docker 装了但没运行：ssh $HOST 'systemctl enable --now docker'"
+
+# ---------- 3. 复用远端已有的密码和 key ----------
+# 这一步很重要：每次部署都重新生成密码，十个同事的浏览器会集体 401，
+# 而他们只会觉得「你这工具又坏了」。
+REMOTE_ENV="$REMOTE_DIR/.env"
+OLD_PW=""
+if ssh "$HOST" "test -f $REMOTE_ENV" 2>/dev/null; then
+  OLD_PW="$(ssh "$HOST" "grep '^APP_PASSWORD=' $REMOTE_ENV 2>/dev/null | cut -d= -f2-" || true)"
+fi
+
+if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+  REMOTE_HAS_KEY="$(ssh "$HOST" "grep -q '^DEEPSEEK_API_KEY=sk-' $REMOTE_ENV 2>/dev/null && echo yes || echo no" 2>/dev/null || echo no)"
+  if [[ "$REMOTE_HAS_KEY" != "yes" ]]; then
+    die "没有 DEEPSEEK_API_KEY，远端也没有。带上再跑：DEEPSEEK_API_KEY=sk-xxxx $0 $HOST"
+  fi
+  say "沿用远端已有的 DEEPSEEK_API_KEY"
+fi
+
+if [[ -n "${APP_PASSWORD:-}" ]]; then
+  APP_PW="$APP_PASSWORD"
+  say "使用传入的 APP_PASSWORD"
+elif [[ -n "$OLD_PW" ]]; then
+  APP_PW="$OLD_PW"
+  say "沿用远端已有的访问密码"
+else
+  APP_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-14)"
+  say "首次部署，生成随机访问密码"
+fi
+
+APP_USER_NAME="${APP_USER:-admin}"
+
+# ---------- 4. 推代码 ----------
+say "同步代码到 $HOST:$REMOTE_DIR"
+ssh "$HOST" "mkdir -p $REMOTE_DIR"
+# 排除项说明：
+#   data/ logs/ 是本机产物，传上去只会污染云端、甚至用旧库覆盖新库
+#   target/ 只放行那一个 jar（服务器上要用它打运行镜像），其余 class 文件不传
+#   .env 单独写（里面有密码），不进 rsync，避免被 --delete 误删
+rsync -az --delete \
+  --exclude '.git' \
+  --exclude '.idea' \
+  --exclude '*.iml' \
+  --include 'target/' \
+  --include 'target/cls-news-0.1.0.jar' \
+  --exclude 'target/*' \
+  --exclude 'data' \
+  --exclude 'logs' \
+  --exclude '.env' \
+  --exclude 'deploy/laptop/config.env' \
+  --exclude '*.log' \
+  --exclude '.DS_Store' \
+  "$PROJECT_DIR/" "$HOST:$REMOTE_DIR/"
+
+# ---------- 5. 写 .env ----------
+# 按远端实际内存自动定容器上限。1G 的小机器（阿里云试用、轻量最低配）
+# 如果按 512m 跑，加上系统本身和 Docker，很容易被 OOM killer 干掉，
+# 表现是容器反复重启、日志只有一句 Killed，极难往内存上想。
+REMOTE_MEM_MB="$(ssh "$HOST" "free -m 2>/dev/null | awk '/^Mem:/{print \$2}'" 2>/dev/null || echo "")"
+if [[ "$REMOTE_MEM_MB" =~ ^[0-9]+$ ]] && (( REMOTE_MEM_MB <= 1000 )); then
+  # 1G 规格的机器标称 1G，free 只能看到 ~894MB；其中阿里云 aegis 安全组件、
+  # aliyun-assist、Ubuntu 默认服务已占掉 370MB 左右，实际可用不到 520MB。
+  # 448m 会贴到天花板，384m（堆约 268MB）实测够这个应用跑。
+  MEM_LIMIT=384m
+  say "远端内存 ${REMOTE_MEM_MB}MB（1G 规格），容器上限设为 384m"
+elif [[ "$REMOTE_MEM_MB" =~ ^[0-9]+$ ]] && (( REMOTE_MEM_MB <= 1600 )); then
+  MEM_LIMIT=448m
+  say "远端内存 ${REMOTE_MEM_MB}MB（小内存机器），容器上限设为 448m"
+else
+  MEM_LIMIT=512m
+  [[ -n "$REMOTE_MEM_MB" ]] && say "远端内存 ${REMOTE_MEM_MB}MB，容器上限 512m"
+fi
+
+say "写入远端 .env"
+{
+  echo "# 由 deploy.sh 生成，不要提交"
+  echo "TZ=Asia/Shanghai"
+  echo "DB_PATH=/app/data/news.db"
+  echo "APP_AUTH=true"
+  echo "APP_USER=$APP_USER_NAME"
+  echo "APP_PASSWORD=$APP_PW"
+  echo "BIND_ADDR=0.0.0.0"
+  echo "HOST_PORT=$HOST_PORT"
+  echo "MEM_LIMIT=$MEM_LIMIT"
+  # 服务器只用运行镜像（见 deploy/cloud/Dockerfile.runtime 里的说明）
+  echo "DOCKERFILE=deploy/cloud/Dockerfile.runtime"
+  if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+    echo "DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
+  else
+    # 保留远端原有 key
+    ssh "$HOST" "grep '^DEEPSEEK_API_KEY=' $REMOTE_ENV 2>/dev/null" || true
+  fi
+} | ssh "$HOST" "cat > $REMOTE_ENV && chmod 600 $REMOTE_ENV"
+
+# ---------- 6. 构建并启动 ----------
+say "构建镜像并启动（运行镜像只拉 JRE，不跑 Maven）"
+# 只用 compose v2。不兜底到 docker-compose(v1)：
+# v1 在 2023 年就停止维护，新系统上都没有；兜底只会把真正的构建错误
+# 变成一句 "docker-compose: command not found"，让人查错方向。
+ssh "$HOST" "cd $REMOTE_DIR && docker compose up -d --build"
+
+# ---------- 7. 等健康检查 ----------
+say "等待服务健康（最多 90 秒）"
+for i in $(seq 1 30); do
+  code="$(ssh "$HOST" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$HOST_PORT/healthz" 2>/dev/null || echo 000)"
+  if [[ "$code" == "200" ]]; then
+    say "服务已就绪"
+    break
+  fi
+  [[ $i -eq 30 ]] && die "90 秒仍未就绪。看日志：ssh $HOST 'cd $REMOTE_DIR && docker compose logs -f --tail=80'"
+  sleep 3
+done
+
+# ---------- 8. 报告 ----------
+PUBLIC_IP="${HOST#*@}"
+echo
+echo "════════════════════════════════════════════"
+echo "  部署完成"
+echo "════════════════════════════════════════════"
+echo "  访问地址：http://$PUBLIC_IP:$HOST_PORT"
+echo "  账号密码：$APP_USER_NAME / $APP_PW"
+echo
+echo "  直接发给同事的说明："
+echo "  ─────────────────────────────────────"
+echo "  财联社快讯（内部工具）"
+echo "  地址：http://$PUBLIC_IP:$HOST_PORT"
+echo "  账号：$APP_USER_NAME"
+echo "  密码：$APP_PW"
+echo "  ─────────────────────────────────────"
+echo
+echo "  常用命令："
+echo "    看日志  ssh $HOST 'cd $REMOTE_DIR && docker compose logs -f --tail=50'"
+echo "    重启    ssh $HOST 'cd $REMOTE_DIR && docker compose restart'"
+echo "    查进度  curl -s -u $APP_USER_NAME:$APP_PW http://$PUBLIC_IP:$HOST_PORT/api/news | python3 -m json.tool | head -20"
+echo "            （注意：运行镜像是 JRE，里面没有 sqlite3 命令，别用 docker compose exec 查库）"
+echo

@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>财联社电报 · 实时</title>
+<style>
+  :root{
+    --bg:#0a0b0d; --panel:#101216; --line:#1e2128; --line-2:#2a2e37;
+    --text:#e7e9ee; --muted:#868d9b; --dim:#5d646f;
+    --up:#e5484d; --down:#2fa66a; --amber:#d9a441;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;
+       -webkit-font-smoothing:antialiased}
+  header{position:sticky;top:0;z-index:9;background:var(--bg);
+         border-bottom:.5px solid var(--line);padding:14px 20px;
+         display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:10px;min-width:0}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex:none;transition:background .3s}
+  .dot.ok{background:var(--down);animation:pulse 2.4s infinite}
+  .dot.warn{background:var(--amber)}
+  .dot.err{background:var(--up)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  h1{margin:0;font-size:15px;font-weight:500;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12px;border:.5px solid var(--line-2);
+       border-radius:4px;padding:1px 6px}
+  .meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+  .meta b{color:var(--text);font-weight:500}
+  button{background:transparent;border:.5px solid var(--line-2);color:var(--muted);
+         font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:inherit}
+  button:hover{border-color:#3b414c;color:var(--text)}
+  main{max-width:920px;margin:0 auto;padding:0 20px 80px}
+  ul{list-style:none;margin:0;padding:0}
+  li{display:grid;grid-template-columns:56px 1fr;gap:14px;
+     padding:14px 0;border-bottom:.5px solid var(--line)}
+  li.new{animation:flash 2.2s ease-out}
+  @keyframes flash{0%{background:rgba(217,164,65,.10)}100%{background:transparent}}
+  .time{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;
+        padding-top:2px;display:flex;flex-direction:column;gap:5px}
+  .lv{font-size:10px;line-height:1.4;text-align:center;border-radius:3px;
+      padding:0 4px;width:fit-content;border:.5px solid var(--line-2);color:var(--dim)}
+  .lv.a{color:var(--amber);border-color:rgba(217,164,65,.45)}
+  .txt{margin:0;white-space:pre-wrap;word-break:break-word}
+  a.title{color:var(--text);text-decoration:none;border-bottom:.5px solid transparent}
+  a.title:hover{border-bottom-color:var(--line-2)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{font-size:11px;color:var(--muted);border:.5px solid var(--line-2);
+        border-radius:4px;padding:1px 6px}
+  .ana{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+  .pill{font-size:11px;padding:1px 7px;border-radius:4px;border:.5px solid}
+  .pill.up{color:var(--up);border-color:rgba(229,72,77,.45)}
+  .pill.down{color:var(--down);border-color:rgba(47,166,106,.45)}
+  .pill.flat{color:var(--muted);border-color:var(--line-2)}
+  .why{font-size:12px;color:var(--muted)}
+  #empty{padding:60px 0;text-align:center;color:var(--dim);font-size:13px}
+  footer{max-width:920px;margin:0 auto;padding:0 20px 40px;
+         color:var(--dim);font-size:11px;line-height:1.8}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot" id="live"></span>
+    <h1>财联社电报</h1>
+    <span class="sub" id="src">cls.cn</span>
+  </div>
+  <div class="meta">
+    <span>已收录 <b id="count">0</b> 条</span>
+    <span>·</span>
+    <span id="last">等待首次抓取</span>
+    <button id="refresh">立即刷新</button>
+  </div>
+</header>
+
+<main>
+  <div id="empty">正在抓取首批数据…</div>
+  <ul id="list"></ul>
+</main>
+
+<footer>
+  个人自用 · 内容版权归财联社所有，仅做本地研究，不对外转载<br>
+  服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量
+</footer>
+
+<script>
+(function () {
+  const listEl = document.getElementById('list');
+  const emptyEl = document.getElementById('empty');
+  const countEl = document.getElementById('count');
+  const lastEl = document.getElementById('last');
+  const srcEl = document.getElementById('src');
+  const liveEl = document.getElementById('live');
+  const ivEl = document.getElementById('iv');
+
+  let maxId = 0;
+  let firstLoad = true;
+  let busy = false;
+
+  const esc = s => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  function hhmmss(sec) {
+    const d = new Date(sec * 1000);
+    const p = n => String(n).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  function sentimentPill(a) {
+    if (!a) return '';
+    const s = a.sentiment || 'neutral';
+    const cls = s === 'bullish' ? 'up' : s === 'bearish' ? 'down' : 'flat';
+    const label = s === 'bullish' ? '利好' : s === 'bearish' ? '利空' : '中性';
+    const conf = typeof a.confidence === 'number'
+        ? ' ' + Math.round(a.confidence * 100) + '%' : '';
+    const why = a.summary ? '<span class="why">' + esc(a.summary) + '</span>' : '';
+    return '<div class="ana"><span class="pill ' + cls + '">' + label + conf + '</span>' + why + '</div>';
+  }
+
+  function render(n, isNew) {
+    const li = document.createElement('li');
+    if (isNew) li.className = 'new';
+    const lv = (n.level || '').toUpperCase();
+    const lvHtml = (lv === 'A' || lv === 'B')
+        ? '<span class="lv a">' + lv + '</span>' : '';
+
+    const stocks = (n.stocks || []).map(s =>
+        '<span class="chip">' + esc(s.name) + (s.code ? ' ' + esc(s.code) : '') + '</span>'
+    ).join('');
+
+    li.innerHTML =
+      '<div class="time">' + hhmmss(n.time) + lvHtml + '</div>' +
+      '<div>' +
+        '<p class="txt"><a class="title" href="' + esc(n.url) + '" target="_blank" rel="noopener">'
+          + esc(n.text) + '</a></p>' +
+        (stocks ? '<div class="chips">' + stocks + '</div>' : '') +
+        sentimentPill(n.analysis) +
+      '</div>';
+    return li;
+  }
+
+  function applyStats(st) {
+    if (!st) return;
+    countEl.textContent = st.total != null ? st.total : 0;
+    if (st.intervalMs) ivEl.textContent = Math.round(st.intervalMs / 1000);
+    if (st.source) srcEl.textContent = st.source;
+    if (st.lastError) {
+      liveEl.className = 'dot err';
+      lastEl.textContent = '抓取失败，重试中';
+      lastEl.title = st.lastError;
+    } else if (st.lastRunAt) {
+      liveEl.className = 'dot ok';
+      lastEl.textContent = '最近抓取 ' + hhmmss(st.lastRunAt);
+      lastEl.title = '';
+    }
+  }
+
+  async function pull(manual) {
+    if (busy) return;
+    busy = true;
+    try {
+      const isInitial = firstLoad;
+      const url = isInitial
+          ? '/api/news?limit=100'
+          : '/api/news?since=' + maxId + '&limit=100';
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+
+      applyStats(data.stats);
+
+      const items = data.items || [];
+      if (isInitial) {
+        listEl.innerHTML = '';
+        items.forEach(n => listEl.appendChild(render(n, false)));
+        if (items.length) {
+          firstLoad = false;      // 库还是空的就继续走全量，避免 since=0 打乱顺序
+          emptyEl.style.display = 'none';
+        } else {
+          emptyEl.textContent = '本地库还是空的，等第一轮抓取…';
+        }
+      } else if (items.length) {
+        // 增量按发布时间升序返回，逐个插到最前面 → 最新的自然在最上
+        items.forEach(n => listEl.insertBefore(render(n, true), listEl.firstChild));
+        const cap = 300;
+        while (listEl.children.length > cap) listEl.removeChild(listEl.lastChild);
+      }
+
+      if (typeof data.maxId === 'number') maxId = data.maxId;
+    } catch (e) {
+      liveEl.className = 'dot err';
+      lastEl.textContent = '连接失败';
+      lastEl.title = e.message;
+      if (manual) liveEl.className = 'dot warn';
+    } finally {
+      busy = false;
+    }
+  }
+
+  document.getElementById('refresh').addEventListener('click', () => pull(true));
+
+  pull(false);
+  setInterval(() => pull(false), 30000);
+})();
+</script>
+</body>
+</html>

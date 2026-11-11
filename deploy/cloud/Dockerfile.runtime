@@ -1,0 +1,38 @@
+# 云服务器专用运行镜像：只跑 jar，不含 Maven / JDK / 源码。
+#
+# 为什么不复用根目录那个多阶段 Dockerfile：
+#   1. 多阶段要拉 maven:3.9-eclipse-temurin-17（约 500MB），4M 带宽要十几分钟；
+#      这个只拉 JRE（约 200MB），快一半以上。
+#   2. 2核2G 的机器跑 mvn package 会被 OOM killer 盯上，表现是构建中途
+#      「Killed」，看起来像网络问题，其实查半天是内存。
+#   3. jar 在本地打，出错能立刻看到，不用 ssh 上去翻半天的构建日志。
+#
+# jar 由 deploy.sh 在本地构建好再同步上来，构建上下文里必须有 target/cls-news-0.1.0.jar。
+ARG JRE_IMAGE=eclipse-temurin:17-jre
+FROM ${JRE_IMAGE}
+
+ENV TZ=Asia/Shanghai \
+    LANG=C.UTF-8
+
+# curl 只给 HEALTHCHECK 用；Ubuntu 基础镜像不自带
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r app && useradd -r -g app -d /app -s /sbin/nologin app \
+    && mkdir -p /app/data && chown -R app:app /app
+
+WORKDIR /app
+COPY target/cls-news-0.1.0.jar /app/app.jar
+RUN chown app:app /app/app.jar
+
+USER app
+
+ENV DB_PATH=/app/data/news.db \
+    JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError -Duser.timezone=Asia/Shanghai -Dfile.encoding=UTF-8"
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/healthz > /dev/null || exit 1
+
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

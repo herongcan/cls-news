@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  仅用于容器内构建。宿主机用的是你自己的 ~/.m2/settings.xml，与之无关。
+  为什么要有这个文件：容器里没有你那套配置，不指定镜像就会从 Maven Central 拉，
+  国内网络下这一步是最容易卡住的地方（实测 TLS 超时）。
+  阿里云对海外也可达，所以不做成两个分支。
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+    <mirrors>
+        <mirror>
+            <id>aliyun</id>
+            <name>Aliyun Public</name>
+            <mirrorOf>central</mirrorOf>
+            <url>https://maven.aliyun.com/repository/public</url>
+        </mirror>
+    </mirrors>
+</settings>

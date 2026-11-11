@@ -1,0 +1,47 @@
+services:
+  cls-news:
+    build:
+      context: .
+      # 本机默认走多阶段（从源码构建）；
+      # 云服务器上 .env 会设成 deploy/cloud/Dockerfile.runtime（只跑 jar，不装 Maven）
+      dockerfile: ${DOCKERFILE:-Dockerfile}
+    image: cls-news:0.1.0
+    container_name: cls-news
+    restart: unless-stopped
+
+    # 绑定地址做成变量，一份文件两用：
+    #   本机调试：BIND_ADDR=127.0.0.1（默认，只能自己访问）
+    #   云服务器：BIND_ADDR=0.0.0.0  （公网可访问，此时 APP_AUTH 必须为 true）
+    # 用 18080 而不是 80 做宿主机端口：国内云上未备案域名不能用 80/443，
+    # 但 IP 直连非标端口不受影响，省掉整个备案流程。
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-18080}:8080"
+
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      DB_PATH: /app/data/news.db
+
+    volumes:
+      # 命名卷而不是 ./data 绑定挂载：Linux 上绑定挂载会把宿主目录的 uid
+      # 带进容器，而容器内是 app 用户，结果就是「启动正常、一写入就 read-only」。
+      # 命名卷由 Docker 负责属主，跨机器行为一致。
+      - cls-data:/app/data
+
+    # 容器内存上限做成变量，因为宿主机规格差别很大：
+    #   1G 机器（如阿里云试用、轻量最低配）用 448m，给系统和 Docker 留出余量；
+    #   2G 及以上用 512m（默认）。
+    # JVM 的 MaxRAMPercentage=70 会按这个上限算堆，不必手写 -Xmx。
+    mem_limit: ${MEM_LIMIT:-512m}
+
+    logging:
+      # 不限制的话，一天几百 KB 日志会一直长，几个月后把磁盘写满，
+      # 而 SQLite 写不进去的表现是「采集静默停止」——很难查。
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cls-data:

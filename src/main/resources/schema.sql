@@ -33,3 +33,18 @@ CREATE TABLE IF NOT EXISTS analysis_call (
 );
 
 CREATE INDEX IF NOT EXISTS idx_call_ts ON analysis_call (ts);
+
+-- 访客统计：按「IP + 日期」去重。
+-- 主键就是去重规则本身，所以「今日访客」= COUNT(*) WHERE day=?，
+-- 「总访客」= COUNT(DISTINCT ip)，不需要额外去重逻辑。
+-- hits 记的是当天这个 IP 打开页面的次数（PV），只存不展示，留着以后看趋势。
+CREATE TABLE IF NOT EXISTS visit (
+    ip       TEXT    NOT NULL,
+    day      TEXT    NOT NULL,                        -- yyyy-MM-dd，服务器本地时区
+    first_ts INTEGER NOT NULL,
+    last_ts  INTEGER NOT NULL,
+    hits     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (ip, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_visit_day ON visit (day);

@@ -43,7 +43,10 @@ public class AppProps {
         /** 关掉时完全不拦截（本机开发用）。上线必须 true */
         private boolean enabled = false;
         private String username = "admin";
-        /** 留空则启动时直接失败，不允许「以为开了其实没密码」 */
+        /**
+         * 默认 admin（见 application.yml 的 ${APP_PASSWORD:admin}）。
+         * 代码里的默认值仍留空：留空时启动直接失败，不允许「以为开了鉴权其实没密码」。
+         */
         private String password = "";
         /** 健康检查不能要密码，否则 Docker/负载均衡永远判死 */
         private String[] permitPaths = {"/healthz"};

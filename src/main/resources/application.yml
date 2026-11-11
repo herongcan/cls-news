@@ -72,7 +72,12 @@ app:
   security:
     enabled: ${APP_AUTH:false}
     username: ${APP_USER:admin}
-    password: ${APP_PASSWORD:}
+    # 默认 admin/admin。这是十来个同事共用的内网工具，密码说好一个固定的就够了，
+    # 每次部署随机生成反而会逼所有人把密码抄在便签上，安全性并不会更高。
+    # 代价是：知道地址的人试一下就能进。公网环境下至少改一位，或用 APP_PASSWORD 覆盖。
+    # 注意 APP_PASSWORD 显式设成空字符串**不会**回落到这个默认值，而是直接启动失败——
+    # 「以为开了鉴权、其实密码是空串」比明说没开更危险。
+    password: ${APP_PASSWORD:admin}
     permit-paths:
       - /healthz
 

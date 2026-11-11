@@ -11,7 +11,8 @@
 # 可覆盖的变量：
 #   REMOTE_DIR  远端目录，默认 /opt/cls-news
 #   HOST_PORT   宿主机端口，默认 8080
-#   APP_PASSWORD 访问密码；不传则沿用远端已有的，远端也没有就随机生成
+#   APP_PASSWORD 访问密码，默认 admin
+#   APP_USER     访问账号，默认 admin
 #
 set -euo pipefail
 
@@ -60,14 +61,8 @@ fi
 say "检查远端 Docker 是否在跑"
 ssh "$HOST" 'docker info' >/dev/null 2>&1 || die "Docker 装了但没运行：ssh $HOST 'systemctl enable --now docker'"
 
-# ---------- 3. 复用远端已有的密码和 key ----------
-# 这一步很重要：每次部署都重新生成密码，十个同事的浏览器会集体 401，
-# 而他们只会觉得「你这工具又坏了」。
+# ---------- 3. 复用远端已有的 key ----------
 REMOTE_ENV="$REMOTE_DIR/.env"
-OLD_PW=""
-if ssh "$HOST" "test -f $REMOTE_ENV" 2>/dev/null; then
-  OLD_PW="$(ssh "$HOST" "grep '^APP_PASSWORD=' $REMOTE_ENV 2>/dev/null | cut -d= -f2-" || true)"
-fi
 
 if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   REMOTE_HAS_KEY="$(ssh "$HOST" "grep -q '^DEEPSEEK_API_KEY=sk-' $REMOTE_ENV 2>/dev/null && echo yes || echo no" 2>/dev/null || echo no)"
@@ -77,18 +72,14 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   say "沿用远端已有的 DEEPSEEK_API_KEY"
 fi
 
-if [[ -n "${APP_PASSWORD:-}" ]]; then
-  APP_PW="$APP_PASSWORD"
-  say "使用传入的 APP_PASSWORD"
-elif [[ -n "$OLD_PW" ]]; then
-  APP_PW="$OLD_PW"
-  say "沿用远端已有的访问密码"
-else
-  APP_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-14)"
-  say "首次部署，生成随机访问密码"
-fi
-
+# 访问密码固定 admin/admin（可用 APP_PASSWORD 覆盖）。
+# 这里从「随机生成 + 沿用远端旧密码」改成固定值，是因为多人共用一个账号：
+# 每次部署重新生成，十个同事的浏览器会集体 401，而他们只会觉得「你这工具又坏了」；
+# 沿用旧密码又会让密码散落在每个人的历史记录里、自己都说不清是哪个。
+# 固定一个大家事先说好的，反而最省事。
+APP_PW="${APP_PASSWORD:-admin}"
 APP_USER_NAME="${APP_USER:-admin}"
+say "访问账号 ${APP_USER_NAME} / ${APP_PW}"
 
 # ---------- 4. 推代码 ----------
 say "同步代码到 $HOST:$REMOTE_DIR"

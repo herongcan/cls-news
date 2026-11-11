@@ -10,6 +10,7 @@ import com.herc.clsnews.model.News;
 import com.herc.clsnews.model.NewsView;
 import com.herc.clsnews.source.NewsSource;
 import com.herc.clsnews.store.NewsStore;
+import com.herc.clsnews.store.VisitStore;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,6 +20,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,15 +32,17 @@ import java.util.Map;
 public class NewsController {
 
     private final NewsStore store;
+    private final VisitStore visits;
     private final IngestJob ingest;
     private final NewsSource source;
     private final AnalysisService analysis;
     private final AppProps props;
     private final ObjectMapper mapper;
 
-    public NewsController(NewsStore store, IngestJob ingest, NewsSource source,
+    public NewsController(NewsStore store, VisitStore visits, IngestJob ingest, NewsSource source,
                           AnalysisService analysis, AppProps props, ObjectMapper mapper) {
         this.store = store;
+        this.visits = visits;
         this.ingest = ingest;
         this.source = source;
         this.analysis = analysis;
@@ -176,10 +181,29 @@ public class NewsController {
         return stats();
     }
 
+    /**
+     * 访客明细。页面顶栏只用 today/total 两个数，这个接口给的是趋势，
+     * 用来回答「数字不涨了」到底是没人来、还是统计坏了。
+     */
+    @GetMapping("/visits")
+    public Map<String, Object> visitStats(@RequestParam(defaultValue = "7") int days) {
+        String today = LocalDate.now(ZoneId.systemDefault()).toString();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("today", visits.countToday(today));
+        body.put("total", visits.countTotal());
+        body.put("hitsToday", visits.hitsToday(today));
+        body.put("days", visits.recentDays(days));
+        return body;
+    }
+
     private Map<String, Object> stats() {
         Map<String, Object> s = new LinkedHashMap<>();
         s.put("total", store.count());
         s.put("pending", store.countByStatus("pending"));
+        // 访客按 IP + 自然日去重：今日 = 今天来过的不同 IP 数，总 = 历史累计的不同 IP 数
+        String today = LocalDate.now(ZoneId.systemDefault()).toString();
+        s.put("visitToday", visits.countToday(today));
+        s.put("visitTotal", visits.countTotal());
         s.put("source", source.name());
         s.put("intervalMs", props.getIntervalMs());
         s.put("lastRunAt", ingest.getLastRunAt());

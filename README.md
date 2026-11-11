@@ -116,7 +116,7 @@ APP_AUTH=true APP_USER=admin APP_PASSWORD='你的密码' java -jar target/cls-ne
 | `app.analysis.max-tokens` | `2000` | **别调小**：推理型模型的思考过程也算在内，600 会让 JSON 被截断 |
 | `spring.task.scheduling.pool.size` | `4` | **别改回 1**：单线程时一个卡住的模型调用会把采集一起拖死 |
 | `app.security.enabled` | `false` | 环境变量 `APP_AUTH`。放公网必须 `true` |
-| `app.security.username` / `password` | `admin` / 空 | 环境变量 `APP_USER` / `APP_PASSWORD`。密码空 + 开启鉴权 = 启动失败 |
+| `app.security.username` / `password` | `admin` / `admin` | 环境变量 `APP_USER` / `APP_PASSWORD`。密码空 + 开启鉴权 = 启动失败 |
 | `spring.datasource.url` | `./data/news.db` | 环境变量 `DB_PATH`。容器里指向挂载卷 `/app/data/news.db` |
 
 关于频率：你说的是「半分钟爬一次」。我把两个 30 秒拆开了 —— **页面每 30 秒拉增量**

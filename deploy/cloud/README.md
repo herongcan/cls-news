@@ -96,7 +96,7 @@ cd /Users/herc/WorkBuddy/2026-11-10-12-44-38/cls-news
 DEEPSEEK_API_KEY=sk-你的key ./deploy/cloud/deploy.sh root@你的公网IP
 ```
 
-脚本会依次做：本地打 jar → 同步代码 → 写远端 `.env`（随机密码）→ 构建镜像 → 起容器 →
+脚本会依次做：本地打 jar → 同步代码 → 写远端 `.env`（账号密码固定 `admin` / `admin`）→ 构建镜像 → 起容器 →
 轮询 `/healthz` 直到就绪 → 把访问地址和密码打印出来。
 
 首次大概 5-8 分钟（主要是拉 JRE 基础镜像，4M 带宽）。之后改代码重跑同一条命令，
@@ -145,7 +145,8 @@ ssh root@IP "cd /opt/cls-news && docker compose exec cls-news \
 ./deploy/cloud/deploy.sh root@你的公网IP
 ```
 
-脚本会沿用远端已有的密码（不会把同事踢下线）和 key。
+脚本会沿用远端已有的 key；访问密码是固定的 `admin/admin`，不会变，同事不会掉线。
+想换密码就在命令前加 `APP_PASSWORD=新密码`。
 
 ### 备份
 

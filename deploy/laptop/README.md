@@ -11,7 +11,7 @@
 三步，10 分钟能发出链接：
 
 ```bash
-# 1. 装成常驻服务（自动生成密码、开机自启、崩溃自愈、防休眠）
+# 1. 装成常驻服务（默认账号密码 admin/admin、开机自启、崩溃自愈、防休眠）
 cd /Users/herc/WorkBuddy/2026-11-10-12-44-38/cls-news
 ./deploy/laptop/install.sh
 

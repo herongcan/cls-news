@@ -27,7 +27,11 @@
   h1{margin:0;font-size:15px;font-weight:500;letter-spacing:.2px}
   .sub{color:var(--dim);font-size:12px;border:.5px solid var(--line-2);
        border-radius:4px;padding:1px 6px}
-  .meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+  /* 状态项多了一组（访客）之后，窄屏会把每一项挤成两行（"已收录 / 190 条"），
+     读起来像表格。让每一项整体换行，而不是项内文字换行。 */
+  .meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;
+        flex-wrap:wrap;row-gap:4px}
+  .meta>span{white-space:nowrap}
   .meta b{color:var(--text);font-weight:500}
   button{background:transparent;border:.5px solid var(--line-2);color:var(--muted);
          font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:inherit}
@@ -105,6 +109,8 @@
   <div class="meta">
     <span>已收录 <b id="count">0</b> 条</span>
     <span>·</span>
+    <span id="visits" title="按 IP 去重，同一 IP 一天只算一个访客">今日访客 <b id="vToday">0</b> · 累计 <b id="vTotal">0</b></span>
+    <span>·</span>
     <span id="anaToday">今日调用 0</span>
     <span>·</span>
     <span id="last">等待首次抓取</span>
@@ -123,7 +129,8 @@
   个人自用 · 内容版权归财联社所有，仅做本地研究，不对外转载<br>
   服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量；
   向下滚动自动加载更早的记录，点击股票标签可跳转行情页<br>
-  大模型分析为手动触发：点「分析」才调用，同一条 90 秒内重复点会直接返回上次结果、不重复计费
+  大模型分析为手动触发：点「分析」才调用，同一条 90 秒内重复点会直接返回上次结果、不重复计费<br>
+  访客数按 IP 去重：同一 IP 一天只算一次，同一出口 IP 下的多个人会被算作一个
 </footer>
 
 <script>
@@ -140,6 +147,8 @@
   const moreEl = document.getElementById('more');
   const sentinel = document.getElementById('sentinel');
   const anaTodayEl = document.getElementById('anaToday');
+  const vTodayEl = document.getElementById('vToday');
+  const vTotalEl = document.getElementById('vTotal');
 
   let maxId = 0;            // 增量游标：全局最大 id，由服务端给
   let minId = 0;            // 翻页游标：列表里最旧一条的 id
@@ -250,6 +259,8 @@
   function applyStats(st) {
     if (!st) return;
     countEl.textContent = st.total != null ? st.total : 0;
+    if (st.visitToday != null) vTodayEl.textContent = st.visitToday;
+    if (st.visitTotal != null) vTotalEl.textContent = st.visitTotal;
     if (st.intervalMs) ivEl.textContent = Math.round(st.intervalMs / 1000);
     if (st.source) srcEl.textContent = st.source;
     if (st.analyzedToday != null) {

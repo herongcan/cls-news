@@ -120,10 +120,13 @@ ssh root@IP 'docker --version && docker compose version'   # 要有 compose v2
 ```bash
 cd cls-news
 export JAVA_HOME=/opt/homebrew/opt/openjdk
-mvn -q -B -DskipTests package
+./mvnw -q -B -DskipTests package
 ls -l target/cls-news-0.1.0.jar        # 约 36MB
 ```
 
+> 用 `./mvnw`（Maven 3.9.9，版本锁在仓库里），不要用系统的 `mvn`——本机可能是 3.5.9，
+> 编译 `spring-boot 3.5.4` 时会报 `maven-compiler-plugin requires Maven version 3.6.3`。
+>
 > 一定在本地打。2核2G 的机器跑 Maven 会被 OOM killer 杀掉，日志只有一句 `Killed`，
 > 看起来像网络问题，实际是内存。
 

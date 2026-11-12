@@ -24,9 +24,13 @@ Spring Boot 3 需要 17+）。要用别的 JDK：`CLS_JAVA_HOME=/path/to/jdk17 .
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk
-mvn -q package
+./mvnw -q package
 java -jar target/cls-news-0.1.0.jar
 ```
+
+> **用 `./mvnw` 而不是 `mvn`。** 项目自带 Maven Wrapper（3.9.9），首次执行会把 Maven 下到
+> `~/.m2/wrapper/dists/`，之后直接用。这样本地、GitHub Actions、云效跑的是同一个 Maven 版本，
+> 不会因为某台机器装的是 3.5.9 而编译失败——`spring-boot 3.5.4` 的 compiler 插件要求 ≥ 3.6.3。
 
 用 Docker 跑（推荐，环境全部固化）：
 
@@ -205,7 +209,7 @@ pending ──(原子认领)──> analyzing ──> done
 
 `.github/workflows/deploy.yml`。推到 `main` 就跑，也可以手动触发（Run workflow）。
 
-**它和本地 `deploy.sh` 是同一份逻辑**，不是第二套：流水线只负责在 runner 上 `mvn package`，
+**它和本地 `deploy.sh` 是同一份逻辑**，不是第二套：流水线只负责在 runner 上 `./mvnw package`，
 然后调 `deploy/cloud/deploy.sh`，脚本靠 `CI` 环境变量跳过「本地构建」那一段。
 维护两份部署脚本必然漂移，所以没有另写一份 CI 专用版本。
 
@@ -244,7 +248,7 @@ ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
 
 ### 运行一次会看到什么
 
-1. `mvn -B -DskipTests package`（首次约 2 分钟，有 Maven 缓存后 40 秒左右）
+1. `./mvnw -B -DskipTests package`（首次约 2 分钟，有 Maven 缓存后 40 秒左右）
 2. 校验 `target/cls-news-0.1.0.jar` 是 Spring Boot fat jar（否则服务器上会报
    `no main manifest attribute`，得翻半天日志）
 3. `ssh-keyscan` 写 `known_hosts`（不用 `StrictHostKeyChecking=no`，那个等于关掉中间人防护）

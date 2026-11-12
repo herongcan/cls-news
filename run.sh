@@ -7,4 +7,6 @@ cd "$(dirname "$0")"
 export JAVA_HOME="${CLS_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
 
 mkdir -p data
-exec mvn -q spring-boot:run
+# 用 mvnw：Maven 版本锁在仓库里，不受本机装的是 3.5.9 还是 3.9.x 影响。
+[[ -x ./mvnw ]] || chmod +x ./mvnw
+exec ./mvnw -q spring-boot:run

@@ -48,7 +48,10 @@ else
   export JAVA_HOME="${CLS_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
   if [[ ! -f "$JAR" ]] || [[ -n "$(find src pom.xml -newer "$JAR" -type f -print -quit 2>/dev/null)" ]]; then
     say "本地打包（源码比 jar 新，或 jar 不存在）"
-    mvn -q -B -DskipTests package || die "本地构建失败，先把编译错误修掉"
+    # 用 mvnw 而不是系统 mvn：Maven 版本锁在仓库里，不依赖本机装的是哪个版本。
+    # 之前就因为本机 3.5.9 编译 maven-compiler-plugin 3.14.0 直接失败。
+    [[ -x ./mvnw ]] || chmod +x ./mvnw
+    ./mvnw -q -B -DskipTests package || die "本地构建失败，先把编译错误修掉"
   else
     say "jar 是最新的，跳过构建"
   fi

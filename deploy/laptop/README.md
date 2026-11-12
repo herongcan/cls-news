@@ -138,4 +138,4 @@ sqlite3 data/news.db "select analysis_status, count(*) from news group by 1;"
 - 或者改成 `fulltext: false`（只留摘要 + 原文链接），链接就可以放心一点传播。
 
 改法：`src/main/resources/application.yml` 里 `app.display.fulltext` 改 `false`，
-然后 `mvn -DskipTests package` 重新打包、重启服务。
+然后 `./mvnw -DskipTests package` 重新打包、重启服务。

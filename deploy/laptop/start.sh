@@ -56,7 +56,7 @@ if [[ ! -x "$JAVA_HOME/bin/java" ]]; then
 fi
 
 if [[ ! -f "$JAR" ]]; then
-  echo "[fatal] 缺少 $JAR，先执行：mvn -DskipTests package" >&2
+  echo "[fatal] 缺少 $JAR，先执行：./mvnw -DskipTests package" >&2
   exit 1
 fi
 

@@ -61,10 +61,18 @@ jobs:
           java-version: '17'
           cache: maven
 
+      - name: 缓存 Maven Wrapper 下载的 Maven 本体
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/wrapper
+          key: mvnw-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+          restore-keys: mvnw-${{ runner.os }}-
+
       # 不跑测试：这个仓库目前没有能挡住的测试用例，
       # 让 CI 卡在形式上没意义的绿灯上只会让人习惯性忽略红灯。
+      # 用 ./mvnw：Maven 版本锁在仓库里，和本地、云效跑的是同一个版本。
       - name: 打包
-        run: mvn -B -DskipTests package
+        run: ./mvnw -B -DskipTests package
 
       - name: 校验产物
         run: |

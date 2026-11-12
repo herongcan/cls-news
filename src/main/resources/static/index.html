@@ -98,6 +98,20 @@
                text-underline-offset:4px;text-decoration-color:var(--line-2)}
   #more.manual:hover{color:var(--text);text-decoration-color:#3b414c}
   #sentinel{height:1px}
+  /* 搜索栏单独一行，不塞进 header 的 meta 区 —— 那一块在窄屏已经换行，
+     再放输入框会挤成三行。 */
+  #searchbar{max-width:920px;margin:0 auto;padding:0 20px 12px;display:flex;gap:8px}
+  #q{flex:1;min-width:0;background:var(--panel);border:.5px solid var(--line);
+     border-radius:8px;color:var(--text);font-size:14px;line-height:1.4;padding:9px 12px;
+     font-family:inherit;outline:none;-webkit-appearance:none;appearance:none}
+  #q::placeholder{color:var(--dim)}
+  #q:focus{border-color:var(--line-2)}
+  /* 桌面 14px 合适；手机上必须 16px，否则 iOS Safari 聚焦时会把整页放大且不还原 */
+  @media (max-width:640px){#q{font-size:16px}}
+  #qclear{background:transparent;border:.5px solid var(--line-2);border-radius:8px;
+          color:var(--muted);font-size:12px;padding:0 12px;cursor:pointer;font-family:inherit}
+  #qclear:hover{color:var(--text)}
+  #qclear[hidden]{display:none}
   footer{max-width:920px;margin:0 auto;padding:0 20px 40px;
          color:var(--dim);font-size:11px;line-height:1.8}
   /* 登录层：移动端浏览器不弹 Basic 原生框，凭证只能由页面自己收。
@@ -156,6 +170,11 @@
 </header>
 
 <main>
+  <div id="searchbar">
+    <input id="q" type="search" placeholder="搜索标题或正文…" autocomplete="off"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button id="qclear" type="button" hidden>清除</button>
+  </div>
   <div id="empty">正在抓取首批数据…</div>
   <ul id="list"></ul>
   <div id="more"></div>
@@ -187,6 +206,8 @@
   const anaTodayEl = document.getElementById('anaToday');
   const vTodayEl = document.getElementById('vToday');
   const vTotalEl = document.getElementById('vTotal');
+  const qEl = document.getElementById('q');
+  const qClearEl = document.getElementById('qclear');
 
   // ---------- 登录 ----------
   // 为什么不用浏览器原生的 Basic 弹窗：移动端（微信、QQ、UC 的内置内核，以及不少
@@ -279,6 +300,11 @@
   let loadingMore = false;  // 翻页请求进行中
   let paging = false;       // 是否已经向下翻过历史
   let touched = false;      // 用户是否真的滚动过（用来守住「首屏只 10 条」）
+  let searchMode = false;   // 当前列表展示的是不是搜索结果
+  let searchKw = '';        // 正在展示的关键词（翻页时要带回去）
+  let searchTotal = 0;      // 命中总数，用于「共 N 条」
+  let searchSeq = 0;        // 请求序号：丢弃过期响应
+  let searchTimer = 0;      // 输入防抖
 
   // id -> 条目原始数据。点击分析后要用它做增量更新，
   // 而不是靠读 DOM 反推——DOM 里已经没有了原始字段。
@@ -565,9 +591,99 @@
     } catch (_) { /* 静默失败：下一轮再说 */ }
   }
 
+  // ---------- 搜索 ----------
+  // 搜索不另开页面，而是接管当前列表：搜完最常见的动作是「继续往下看」，
+  // 跳页会打断。代价是三处状态必须显式管好，否则会出现很难复现的串台：
+  //   1. 30 秒增量轮询要停 —— 不停的话搜索结果会在半分钟后被新抓的新闻覆盖
+  //   2. 翻页要换接口，但游标（minId）逻辑完全一样，所以复用的其实是同一套
+  //   3. 输入变化快时旧请求可能后到，用序号丢弃，避免「搜 A 显示 B 的结果」
+
+  async function runSearch(raw) {
+    const kw = (raw || '').trim();
+    const seq = ++searchSeq;
+
+    if (!kw) {
+      // 清空 = 回到正常列表。用 reset 而不是「只清列表」，
+      // 因为增量游标 maxId 在搜索期间没更新过，直接 pull 会重复拉一批旧数据。
+      if (searchMode) resetList();
+      return;
+    }
+
+    searchMode = true;
+    searchKw = kw;
+    // 搜索模式下这些「普通列表」的状态没意义，先归零，免得 loadMore 拿旧游标去翻普通列表
+    polling = false;
+    loadingMore = false;
+    paging = false;
+    touched = false;
+    setMore('loading');
+
+    try {
+      const res = await api('/api/news/search?q=' + encodeURIComponent(kw) + '&limit=' + PAGE);
+      if (seq !== searchSeq) return;            // 已经有更新的关键词了，这份结果作废
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (seq !== searchSeq) return;
+
+      const items = data.items || [];
+      searchTotal = data.total || 0;
+      listEl.innerHTML = '';
+      itemsById.clear();
+      items.forEach(n => listEl.appendChild(render(n, false)));
+      qClearEl.hidden = false;
+
+      // 关键：置 false，否则 loadMore 的第一道闸（firstLoad）会把搜索翻页全拦掉
+      firstLoad = false;
+
+      if (items.length) {
+        minId = items[items.length - 1].id;      // 倒序返回，最后一条最旧
+        hasMore = data.hasMore === true;
+        emptyEl.style.display = 'none';
+        setMore(hasMore ? 'idle' : 'end');
+        if (!hasMore) {
+          moreEl.textContent = '「' + searchKw + '」共 ' + searchTotal + ' 条';
+        }
+        // 一页没撑满视口时页面滚不动，滚动事件永远不会触发，得给个可点的入口
+        if (hasMore) setTimeout(maybePromptMore, 350);
+      } else {
+        minId = 0;
+        hasMore = false;
+        setMore('');
+        emptyEl.textContent = '没有匹配「' + kw + '」的记录';
+        emptyEl.style.display = '';
+      }
+    } catch (e) {
+      if (seq !== searchSeq) return;
+      if (e.message === 'UNAUTHORIZED') return;  // 登录层已弹，不再叠一层报错
+      setMore('error', e.message);
+    }
+  }
+
+  /** 退出搜索，重新走一遍首屏加载。 */
+  function resetList() {
+    searchMode = false;
+    searchKw = '';
+    searchTotal = 0;
+    listEl.innerHTML = '';
+    itemsById.clear();
+    minId = 0;
+    maxId = 0;
+    hasMore = true;
+    firstLoad = true;
+    paging = false;
+    touched = false;
+    setMore('');
+    emptyEl.textContent = '正在抓取首批数据…';
+    emptyEl.style.display = '';
+    pull(false);
+  }
+
   // ---------- 列表 ----------
 
   async function pull(manual) {
+    // 搜索期间跳过轮询：不跳的话每 30 秒一次的增量会把搜索结果冲掉，
+    // 用户会看到「搜出来的东西自己消失了」。
+    if (searchMode) return;
     if (polling) return;
     polling = true;
     try {
@@ -636,7 +752,10 @@
     loadingMore = true;
     setMore('loading');
     try {
-      const res = await api('/api/news?before=' + minId + '&limit=' + PAGE);
+      const url = searchMode
+          ? '/api/news/search?q=' + encodeURIComponent(searchKw) + '&before=' + minId + '&limit=' + PAGE
+          : '/api/news?before=' + minId + '&limit=' + PAGE;
+      const res = await api(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       const items = data.items || [];
@@ -650,6 +769,9 @@
       }
       hasMore = data.hasMore === true && items.length > 0;
       setMore(hasMore ? 'idle' : 'end');
+      if (searchMode && !hasMore) {
+        moreEl.textContent = '「' + searchKw + '」共 ' + searchTotal + ' 条';
+      }
     } catch (e) {
       setMore('error', e.message);
     } finally {
@@ -698,7 +820,45 @@
   moreEl.addEventListener('click', () => {
     if (moreEl.className === 'err' || moreEl.className === 'manual') loadMore(true);
   });
-  document.getElementById('refresh').addEventListener('click', () => pull(true));
+  document.getElementById('refresh').addEventListener('click', () => {
+    // 搜索中按「立即刷新」如果什么都不做，看起来就像按钮坏了；重跑一次搜索更符合直觉
+    if (searchMode) runSearch(searchKw);
+    else pull(true);
+  });
+
+  // 300ms 防抖：覆盖中文输入法的停顿，又不至于让人打两个字就等一次网络
+  qEl.addEventListener('input', e => {
+    qClearEl.hidden = !qEl.value;
+    // 拼音还没上屏时 input 也会触发，此时搜的是 "huigou" 这种拼音串，必须等上屏
+    if (e.isComposing) return;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(qEl.value), 300);
+  });
+
+  // 有些浏览器上屏后不再补发 input，所以 compositionend 也调一次（防抖会合并掉重复调度）
+  qEl.addEventListener('compositionend', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(qEl.value), 300);
+  });
+
+  qEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      clearTimeout(searchTimer);
+      runSearch(qEl.value);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      qClearEl.click();
+    }
+  });
+
+  qClearEl.addEventListener('click', () => {
+    qEl.value = '';
+    qClearEl.hidden = true;
+    clearTimeout(searchTimer);
+    qEl.focus();
+    runSearch('');
+  });
 
   // 启动：存过凭证就直接进（凭证失效的话第一轮请求会 401，自动弹登录层）；
   // 没存过就先给登录框。登录成功后会再调一次 start()，由 started 挡住重复轮询。

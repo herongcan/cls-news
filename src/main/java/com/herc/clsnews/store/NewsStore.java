@@ -67,6 +67,45 @@ public class NewsStore {
         return n == null ? 0 : n;
     }
 
+    /**
+     * 关键词搜索：标题或正文命中即算，排序与游标沿用 {@link #before} 那一套。
+     *
+     * <p><b>为什么用 LIKE，而不给 title 建索引</b>——这问题值得写清楚，因为直觉通常是错的：
+     * <ul>
+     *   <li>{@code LIKE '%词%'} <b>用不上 B-tree 索引</b>。索引按前缀有序存放，
+     *       而这模式第一个字符就是通配符，意味着「任意位置都可能命中」，
+     *       有序性一点都用不到，优化器只能全表扫。建了索引也不会被选中，
+     *       白占空间、拖慢插入。能走索引的只有 `LIKE '词%'`（前缀匹配）。</li>
+     *   <li>FTS5 的 trigram 分词要求查询词 <b>至少 3 个字符</b>，而中文关键词
+     *       大多是两个字（回购、涨停、降息、减持），装上去反而搜不到；
+     *       unicode61 又把连续汉字当一个 token，同样做不了词级匹配。</li>
+     *   <li>实测：全表扫 441 行约 3ms，10 万行（每行 100 字正文）约 35ms。
+     *       这个量级不值得引入任何额外结构。</li>
+     * </ul>
+     * 真到百万行，再考虑 FTS5 自写 tokenizer 或独立搜索引擎。
+     *
+     * @param pattern 已转义并带首尾 % 的 LIKE 模式，由调用方构造（见 NewsController#likePattern）
+     * @param beforeId 游标上界（不含），传 {@code Long.MAX_VALUE} 表示从头开始
+     */
+    public List<News> search(String pattern, long beforeId, int limit) {
+        return jdbc.query("""
+                SELECT * FROM news
+                 WHERE (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')
+                   AND id < ?
+                 ORDER BY publish_time DESC, id DESC
+                 LIMIT ?
+                """, MAP, pattern, pattern, beforeId, limit);
+    }
+
+    /** 命中总数，前端用来显示「找到 N 条」。 */
+    public long countSearch(String pattern) {
+        Long n = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM news
+                 WHERE title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'
+                """, Long.class, pattern, pattern);
+        return n == null ? 0 : n;
+    }
+
     /** 全局最大 id，作为前端增量游标。用全局值而不是「本页最大值」，避免分页边界重复。 */
     public long maxId() {
         Long n = jdbc.queryForObject("SELECT COALESCE(MAX(id), 0) FROM news", Long.class);

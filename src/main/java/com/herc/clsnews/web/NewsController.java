@@ -90,6 +90,66 @@ public class NewsController {
         return body;
     }
 
+    /**
+     * 关键词搜索。参数与返回结构刻意和 {@code /api/news} 对齐（items / hasMore / maxId），
+     * 前端才能复用同一套渲染和翻页代码，不用为搜索结果单写一份列表逻辑。
+     *
+     * <p>路径写 {@code /news/search} 不会被 {@code /news/{id}} 抢走：Spring 的路径匹配
+     * 里字面量优先级高于模板变量。之前 {@code /api/news/visits} 之所以落到 {@code {id}} 上，
+     * 是因为那个路径压根不存在，跟这里的匹配顺序是两回事。
+     */
+    @GetMapping("/news/search")
+    public Map<String, Object> search(@RequestParam(name = "q", required = false) String q,
+                                      @RequestParam(defaultValue = "10") int limit,
+                                      @RequestParam(defaultValue = "0") long before) {
+        int n = Math.max(1, Math.min(limit, 200));
+        String kw = q == null ? "" : q.trim();
+        if (kw.length() > 50) {
+            kw = kw.substring(0, 50);
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        // 空关键词不查库：LIKE '%%' 会命中全表，「搜索」就退化成了「列表」，
+        // 而且前端会显示「找到 441 条」这种毫无意义的提示。
+        if (kw.isEmpty()) {
+            body.put("items", List.of());
+            body.put("total", 0);
+            body.put("hasMore", false);
+            body.put("maxId", store.maxId());
+            body.put("serverTime", Instant.now().getEpochSecond());
+            return body;
+        }
+
+        String pattern = likePattern(kw);
+        long cursor = before > 0 ? before : Long.MAX_VALUE;
+        List<News> rows = store.search(pattern, cursor, n);
+
+        body.put("items", rows.stream().map(this::toView).toList());
+        body.put("total", store.countSearch(pattern));
+        // 取满一页就认为可能还有：最后一页刚好取满时会多发一次请求拿到空数组，
+        // 用一次多余的往返换「不必预先 count 每页剩余」，在 400 条量级上划算。
+        body.put("hasMore", rows.size() >= n);
+        body.put("maxId", store.maxId());
+        body.put("serverTime", Instant.now().getEpochSecond());
+        return body;
+    }
+
+    /**
+     * 把用户输入编成 LIKE 模式，同时转义 LIKE 自己的通配符。
+     *
+     * <p>不转义会让人觉得「搜索在瞎匹配」：搜 {@code 100%} 会变成「100 后面随便什么」，
+     * 搜 {@code a_b} 会命中 {@code axb}。这不涉及注入（值仍然是绑定参数），
+     * 但会让搜索结果不可信。
+     *
+     * <p>顺序不能反：反斜杠必须先转，否则后面新插入的转义符会被二次转义。
+     */
+    private static String likePattern(String raw) {
+        String s = raw.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
+        return "%" + s + "%";
+    }
+
     @GetMapping("/news/{id}")
     public ResponseEntity<?> one(@PathVariable long id) {
         return store.findById(id)

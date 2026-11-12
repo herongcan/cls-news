@@ -252,20 +252,95 @@ ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
 
 ### 备份
 
-SQLite 就一个文件，每天拷一份足够：
+**先说结论：不要用 `cp` / `tar` / `docker cp` 备 SQLite。** 实测过，会丢数据：
+
+这个库跑在 `journal_mode=WAL` + `synchronous=NORMAL` 下。造一个 2 行的库、
+让其中 1 行只待在 `-wal` 里，然后两种方式各拷一次：
+
+| 方式 | 备份里的数据 |
+|---|---|
+| `cp news.db` | 1 行，WAL 里那条没了 |
+| `sqlite3 news.db ".backup ..."` | 2 行，完整 |
+
+那次实验里主库 8192 字节、`-wal` 12392 字节 —— WAL 比主库还大，`cp` 丢的不是
+「一点点」，是超过一半的最新写入。
+
+#### 一次性安装（在服务器上执行）
 
 ```bash
-ssh root@IP 'cat > /etc/cron.daily/cls-backup <<"EOF"
-#!/bin/sh
-mkdir -p /root/backup
-docker run --rm -v cls-news_cls-data:/data -v /root/backup:/backup \
-  alpine tar czf /backup/news-$(date +%F).tar.gz -C /data .
-find /root/backup -name "news-*.tar.gz" -mtime +14 -delete
-EOF
-chmod +x /etc/cron.daily/cls-backup'
+# 1. 宿主机装 sqlite3（约 1MB，只需一次）
+apt-get install -y sqlite3
+
+# 2. 手动跑一次，确认能通
+/opt/cls-news/deploy/cloud/backup.sh
+
+# 3. 装成每天 03:30 自动执行
+cp /opt/cls-news/deploy/cloud/cls-news-backup.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now cls-news-backup.timer
+
+# 4. 确认定时器已就位
+systemctl list-timers cls-news-backup.timer
 ```
 
-保留 14 天。哪天误删了数据，解压回去重启即可。
+`backup.sh` 做四件事：用 Online Backup API 拿一致快照 → `PRAGMA integrity_check`
+校验 → gzip 落盘（权限 600）→ 清理过期。默认存 `/opt/cls-news-backup`，保留 7 天。
+
+想改保留天数：编辑 `cls-news-backup.service` 里的 `KEEP_DAYS`，`daemon-reload` 后重启 timer。
+
+#### 异地副本（强烈建议）
+
+本地备份和数据库在同一块盘上，防得了误删，防不了磁盘故障和整机丢失。
+有 OSS 的话，在 `cls-news-backup.service` 里加一行就多一份异地：
+
+```
+Environment=OSS_URL=oss://你的bucket/cls-news
+```
+
+需要宿主机装了 `ossutil` 并配好凭据。没配也能正常跑，只是每次日志里会提醒一句。
+
+#### 确认备份真的有用（这一步别省）
+
+```bash
+# 列出可用备份
+/opt/cls-news/deploy/cloud/restore.sh
+
+# 看最近一次的日志
+journalctl -u cls-news-backup.service -n 30 --no-pager
+```
+
+日志里应该看到 `校验通过：integrity ok，news N 行`。如果 N 是 0 而线上有数据，
+说明备到了错的库文件，别当它是好的。
+
+#### 恢复
+
+```bash
+/opt/cls-news/deploy/cloud/restore.sh /opt/cls-news-backup/news-2026-11-12_0330.db.gz
+```
+
+脚本会：校验 gzip → 校验 integrity → 打印「恢复后 N 行 / 当前线上 M 行」让你
+输入 `yes` 确认 → 停容器 → 把当前库另存为 `news-before-restore-*.db`（恢复错了
+还能退） → 删 `-wal`/`-shm` → 覆盖 → 起容器 → 轮询 `/healthz`。
+
+**为什么不删 `-wal` 会出事**，实测记录：
+
+> 库里有 v1/v2，备份出 b.db；之后又写入 v3（进了 `-wal`）；进程被 kill 留下 WAL；
+> 用 b.db 覆盖主库但不删 `-wal`，再打开 —— 内容是 `v1, v2, v3`，v3 被复活了，
+> 而 `integrity_check` 返回 **ok**。
+
+得到一个既不是备份、也不是现场的第三种状态，能正常查询、不报错，只能靠人肉核对行数发现。
+更极端的情况：把另一个无关的库的 `-wal` 放到某库旁边，该库数据会被整个覆盖成 WAL 里那份。
+所以脚本里是无条件 `rm`，不依赖 SQLite 去判断「这个 WAL 是不是我的」。
+
+> 顺带说明：正常情况下 `docker compose stop` 会让最后一个连接优雅关闭并自动
+> checkpoint、删除 `-wal`。但崩溃、OOM（`ExitOnOutOfMemoryError`）、断电之后恰恰不会
+> —— 而那正是最需要恢复的时候。所以这一步不能省。
+
+#### 还没做的一件事
+
+部署前自动备份（`deploy.sh` 在 `compose up` 之前先跑一次 `backup.sh`，
+失败就中止部署）。这样「没有备份不动生产数据」能被机器强制住，而不是靠人记得。
+需要时可以加，代价是每次部署多 3 秒、且服务器必须先装好 sqlite3。
 
 ---
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=每天 03:30 备份 cls-news 数据库
+
+[Timer]
+# 凌晨 3:30：财联社电报夜间量小，备份耗时和 IO 抖动都最小。
+OnCalendar=*-*-* 03:30:00
+# 关键：机器在 3:30 关机/重启时，开机后会补跑一次。
+# 没有这一行，一次断电就可能让「每天备份」静默断掉好几天，
+# 而那几天正好是最需要备份的时候。
+Persistent=true
+# 补跑时不要和正在进行的任务重叠（备份本身幂等，重叠只是浪费 IO）
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

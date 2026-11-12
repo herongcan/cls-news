@@ -1,0 +1,28 @@
+[Unit]
+Description=cls-news SQLite 在线备份
+Documentation=file:/opt/cls-news/deploy/cloud/README.md
+# 依赖 docker：备份要靠 docker volume inspect 找库文件路径。
+# 不加 Requires=docker.service，只要求它已经起来（After），
+# 免得 docker 重启时把备份任务一起拉起来失败。
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+# systemd 的默认 PATH 不含 /usr/local/bin，而 ossutil 常装在那里
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=BACKUP_DIR=/opt/cls-news-backup
+Environment=KEEP_DAYS=7
+# 想开异地备份就填这里，例如：
+# Environment=OSS_URL=oss://my-bucket/cls-news
+ExecStart=/opt/cls-news/deploy/cloud/backup.sh
+
+# 备份是后台任务，不该和正常业务抢 CPU/IO。
+# 2 核机器上尤其明显：白天跑一次大备份，容器响应会抖。
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# 卡住时别让它挂到下次 timer 触发还占着：
+# 库只有几十 MB，正常 3 秒内完成，300 秒足够。
+TimeoutStartSec=300

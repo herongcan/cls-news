@@ -102,6 +102,101 @@ DEEPSEEK_API_KEY=sk-你的key ./deploy/cloud/deploy.sh root@你的公网IP
 首次大概 5-8 分钟（主要是拉 JRE 基础镜像，4M 带宽）。之后改代码重跑同一条命令，
 只增量构建，一两分钟。
 
+### 手动分步：脚本到底做了什么
+
+想自己走一遍就照这 7 步，等价于 `deploy.sh`。
+
+**0. 前置**（只需一次）
+
+```bash
+ssh-copy-id root@IP && ssh root@IP 'echo 通了'      # 免密
+ssh root@IP 'docker --version && docker compose version'   # 要有 compose v2
+```
+
+安全组放行 8080，否则「服务起来了但打不开」。
+
+**1. 本地打 jar**
+
+```bash
+cd cls-news
+export JAVA_HOME=/opt/homebrew/opt/openjdk
+mvn -q -B -DskipTests package
+ls -l target/cls-news-0.1.0.jar        # 约 36MB
+```
+
+> 一定在本地打。2核2G 的机器跑 Maven 会被 OOM killer 杀掉，日志只有一句 `Killed`，
+> 看起来像网络问题，实际是内存。
+
+**2. 建目录并同步**
+
+```bash
+ssh root@IP 'mkdir -p /opt/cls-news'
+rsync -az --delete \
+  --exclude '.git' --exclude '.idea' --exclude '*.iml' \
+  --include 'target/' --include 'target/cls-news-0.1.0.jar' --exclude 'target/*' \
+  --exclude 'data' --exclude 'logs' --exclude '.env' --exclude '*.log' \
+  ./ root@IP:/opt/cls-news/
+```
+
+`--delete` 让远端与本地严格一致；`.env` 必须排除，否则会被删掉（里面是密码和 key）。
+
+**3. 写 `.env`**（在远端 `/opt/cls-news/.env`，`chmod 600`）
+
+```ini
+TZ=Asia/Shanghai
+DB_PATH=/app/data/news.db
+APP_AUTH=true
+APP_USER=admin
+APP_PASSWORD=admin
+BIND_ADDR=0.0.0.0
+HOST_PORT=8080
+MEM_LIMIT=512m
+DOCKERFILE=deploy/cloud/Dockerfile.runtime
+DEEPSEEK_API_KEY=sk-xxxx
+```
+
+两个变量最容易错：
+
+- `DOCKERFILE` 不写就回落到根目录的多阶段 Dockerfile，远端要现拉 maven 镜像（约 500MB），
+  4M 带宽十几分钟，还容易被 OOM。
+- `MEM_LIMIT` 按远端 `free -m` 的**总内存**定：≤1000MB 用 `384m`，≤1600MB 用 `448m`，
+  否则 `512m`。写大了会被 OOM killer 反复杀。
+
+**4. 构建并启动**
+
+```bash
+ssh root@IP 'cd /opt/cls-news && docker compose up -d --build'
+```
+
+**5. 等健康检查**
+
+```bash
+for i in $(seq 1 30); do
+  code=$(ssh root@IP "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz")
+  [ "$code" = "200" ] && { echo "就绪"; break; }
+  sleep 3
+done
+```
+
+**6. 验收**（三条都过才算成）
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/healthz          # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/api/news         # 401
+curl -s -u admin:admin http://IP:8080/api/status | python3 -m json.tool  # analysisReady
+```
+
+第 3 条重点看 `analysisReady`：`false` 说明 `.env` 里的 key 没生效，
+同事点「分析」只会拿到 503。
+
+**7. 回滚**（镜像还在，一条命令）
+
+```bash
+ssh root@IP 'cd /opt/cls-news && docker compose down && docker compose up -d'
+```
+
+数据在命名卷 `cls-news_cls-data` 里，`down` 不会丢；**`down -v` 会丢**。
+
 ### 部署完的自检
 
 ```bash
@@ -128,13 +223,17 @@ ssh root@IP 'cd /opt/cls-news && docker compose logs -f --tail=50'
 # 重启
 ssh root@IP 'cd /opt/cls-news && docker compose restart'
 
-# 看采集和分析进度
-ssh root@IP "cd /opt/cls-news && docker compose exec cls-news \
-  sqlite3 /app/data/news.db 'select analysis_status, count(*) from news group by 1'"
+# 看采集和分析进度（走 API，最省事）
+curl -s -u admin:admin http://IP:8080/api/status | python3 -m json.tool
 
-# 看有没有报错
-ssh root@IP "cd /opt/cls-news && docker compose exec cls-news \
-  sqlite3 /app/data/news.db 'select publish_time, substr(last_error,1,80) from news where analysis_status=\"failed\" order by id desc limit 10'"
+# 查库：运行镜像是 JRE，里面没有 sqlite3，别用 docker compose exec 去查。
+# 宿主机装了 sqlite3 才能这么读（只读没问题，库是 WAL 模式）。
+ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
+  \"select analysis_status, count(*) from news group by 1\""
+
+# 看有没有分析失败
+ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
+  \"select id, substr(last_error,1,80) from news where analysis_status='failed' order by id desc limit 10\""
 ```
 
 ### 更新代码

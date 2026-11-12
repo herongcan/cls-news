@@ -55,6 +55,15 @@
   .txt{margin:0;white-space:pre-wrap;word-break:break-word}
   a.title{color:var(--text);text-decoration:none;border-bottom:.5px solid transparent}
   a.title:hover{border-bottom-color:var(--line-2)}
+  /* 搜索命中高亮：半透明琥珀叠色 + color:inherit。
+     不要写成深色字配黄底 —— 整页是暗色，一条条纯黄块会非常刺眼；
+     color:inherit 保证链接本身的文字色不被覆盖。 */
+  .txt mark{background:rgba(217,164,65,.22);color:inherit;
+            padding:0 1px;border-radius:2px;box-decoration-break:clone}
+  /* 命中在正文、标题里没有关键词时给个说明，
+     否则用户会觉得「搜出来了却一个字都没高亮，是不是坏了」 */
+  .hit-note{font-size:10px;color:var(--dim);border:.5px solid var(--line-2);
+            border-radius:3px;padding:0 4px;margin-left:6px;white-space:nowrap}
   .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
   .chip{font-size:11px;color:var(--muted);border:.5px solid var(--line-2);
         border-radius:4px;padding:1px 6px;display:inline-flex;align-items:center;gap:4px;
@@ -301,7 +310,9 @@
   let paging = false;       // 是否已经向下翻过历史
   let touched = false;      // 用户是否真的滚动过（用来守住「首屏只 10 条」）
   let searchMode = false;   // 当前列表展示的是不是搜索结果
-  let searchKw = '';        // 正在展示的关键词（翻页时要带回去）
+  let searchKw = '';        // 正在展示的关键词：翻页要带回、高亮要用它
+                            // 必须是「结果对应的」词，不能用输入框实时值 ——
+                            // 输入框打到一半时列表还是上一份结果，用新词高亮会张冠李戴
   let searchTotal = 0;      // 命中总数，用于「共 N 条」
   let searchSeq = 0;        // 请求序号：丢弃过期响应
   let searchTimer = 0;      // 输入防抖
@@ -313,6 +324,31 @@
   const esc = s => String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+
+  /**
+   * 关键词高亮，返回可以直接塞进 innerHTML 的字符串。
+   *
+   * 两种直觉写法都是错的，这是本函数存在的全部原因：
+   *   1. 先拼 <mark> 再 esc —— 标签自己被转义成 &lt;mark&gt;，页面上直接显示字符
+   *   2. 先 esc 全文再找关键词 —— 关键词含 & < " 时原文已是 &amp;/&lt;，定位不到
+   * 正确做法：按关键词把原文切成片段，每段单独 esc，<mark> 只拼在段与段之间。
+   *
+   * split 传捕获组时，返回数组的奇数位就是被捕获的分隔符（即命中的那一段），
+   * 这是唯一需要理解的技巧，其余都是照常转义。
+   *
+   * @param text 原文（未转义）
+   * @param kw   当前展示结果对应的关键词；为空则退化成纯 esc
+   */
+  function hl(text, kw) {
+    const t = String(text == null ? '' : text);
+    const q = String(kw == null ? '' : kw).trim();
+    if (!q) return esc(t);
+    // 元字符必须转义：用户搜 "(" 或 "[" 会让 RegExp 直接抛 SyntaxError，整页白屏
+    const re = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    return t.split(re)
+        .map((seg, i) => (i % 2 ? '<mark>' + esc(seg) + '</mark>' : esc(seg)))
+        .join('');
+  }
 
   function hhmmss(sec) {
     const d = new Date(sec * 1000);
@@ -430,6 +466,16 @@
     const stocks = (n.stocks || []).map(stockChip).join('');
 
     const day = fmtDay(n.time);
+    // 注意：页面渲染的是 n.text（正文，fulltext=false 时是 60 字摘要），不是 n.title。
+    // 后端搜的是 title OR content，于是出现三种情况：
+    //   1. 正文含关键词 —— 正常标亮（最常见）
+    //   2. 只在标题里 —— 正文里一个字都没有，不说明的话看着就像搜错了
+    //   3. 正文被截断在关键词之前 —— 前端拿不到完整正文，判断不了，也会落到情况 2
+    // 情况 2/3 都只给一句说明，不拉全文：拉全文要改接口，还会顶高行高、搅乱瀑布流裁剪。
+    const kw = searchKw;
+    const shownHit = !kw || String(n.text || '').toLowerCase().includes(kw.toLowerCase());
+    const hitNote = shownHit ? '' :
+        '<span class="hit-note" title="关键词出现在标题里；此处展示的是正文">标题命中</span>';
     li.innerHTML =
       '<div class="time" title="' + fullTs(n.time) + '">' +
         '<span class="stack">' +
@@ -438,7 +484,7 @@
         '</span>' + lvHtml + '</div>' +
       '<div>' +
         '<p class="txt"><a class="title" href="' + esc(n.url) + '" target="_blank" rel="noopener">'
-          + esc(n.text) + '</a></p>' +
+          + hl(n.text, kw) + '</a>' + hitNote + '</p>' +
         (stocks ? '<div class="chips">' + stocks + '</div>' : '') +
         '<div class="ana" data-ana>' + anaHtml(n) + '</div>' +
       '</div>';

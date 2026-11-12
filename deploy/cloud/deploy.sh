@@ -33,12 +33,14 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REMOTE_DIR="${REMOTE_DIR:-/opt/cls-news}"
 HOST_PORT="${HOST_PORT:-8080}"
 DOMAIN="${DOMAIN:-herongcan.icu}"
-# 80 端口时 URL 不显示端口，其余情况带上，避免出现 http://x:80 这种难看的东西
-if [[ "$HOST_PORT" == "80" ]]; then
-  PUBLIC_URL="http://$DOMAIN"
-else
-  PUBLIC_URL="http://$DOMAIN:$HOST_PORT"
-fi
+# 域名是否已备案可用。默认 0，原因见下。
+#
+# 备案拦截是按 HTTP Host 头判定的，不是按端口：只要请求里的域名没备案，
+# 80 拦、8080 也拦，返回的是运营商的「域名暂时无法访问」页面而不是应用页面。
+# 所以未备案期间不能把域名当成访问地址发给同事——他们打开是那个拦截页，
+# 会以为服务挂了。备案通过后设 DOMAIN_READY=1 重新部署即可切换。
+DOMAIN_READY="${DOMAIN_READY:-0}"
+if [[ "$HOST_PORT" == "80" ]]; then PORT_SUFFIX=""; else PORT_SUFFIX=":$HOST_PORT"; fi
 cd "$PROJECT_DIR"
 
 say() { printf '\033[36m[deploy]\033[0m %s\n' "$*"; }
@@ -196,18 +198,26 @@ done
 
 # ---------- 8. 报告 ----------
 PUBLIC_IP="${HOST#*@}"
+IP_URL="http://$PUBLIC_IP:$HOST_PORT"
+if [[ "$DOMAIN_READY" == "1" ]]; then
+  PRIMARY_URL="http://$DOMAIN$PORT_SUFFIX"
+  SECONDARY_LINE="  备用地址：$IP_URL（域名解析异常时可用）"
+else
+  PRIMARY_URL="$IP_URL"
+  SECONDARY_LINE="  域名：$DOMAIN 尚未完成 ICP 备案，此刻访问会看到运营商拦截页，勿发给同事"
+fi
 echo
 echo "════════════════════════════════════════════"
 echo "  部署完成"
 echo "════════════════════════════════════════════"
-echo "  访问地址：$PUBLIC_URL"
-echo "  备用地址：http://$PUBLIC_IP:$HOST_PORT（域名解析异常时可用）"
+echo "  访问地址：$PRIMARY_URL"
+echo "$SECONDARY_LINE"
 echo "  账号密码：$APP_USER_NAME / $APP_PW"
 echo
 echo "  直接发给同事的说明："
 echo "  ─────────────────────────────────────"
 echo "  财联社快讯（内部工具）"
-echo "  地址：$PUBLIC_URL"
+echo "  地址：$PRIMARY_URL"
 echo "  账号：$APP_USER_NAME"
 echo "  密码：$APP_PW"
 echo "  ─────────────────────────────────────"

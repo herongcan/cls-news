@@ -190,8 +190,9 @@ curl -s -u "admin:你的密码" localhost:18080/api/status | grep -o '"analysisR
 
 ### 7. HTTPS（可选项，当前未启用）
 
-**现状**：域名 `herongcan.icu` 已备案，compose 直接映射宿主机 80，走 HTTP。
-想补 HTTPS 时再执行本节，应用和 compose 都不用改结构。
+**现状**：域名 `herongcan.icu` 解析已生效，但 ICP 备案未完成，浏览器访问会看到运营商的
+「域名暂时无法访问」拦截页（按 Host 头判定，跟端口无关）。同事暂用 `http://8.136.19.57:8080`。
+本节步骤在备案通过后再执行。
 
 用 Caddy，它是配 HTTPS 最短的路径（自动申请、自动续期）：
 

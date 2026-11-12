@@ -268,6 +268,20 @@ ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
 - **不上 K8s / SAE / 函数计算**：有状态的单实例 + 本地 SQLite 卷，迁移成本远大于收益。
 - **不在服务器上编译**：1.7G 内存跑 Maven 必死，这条是踩过的坑。
 
+### 另一条路：云效 Flow
+
+`deploy/cloud/deploy-flow.sh` 是给云效用的变体，和 `deploy.sh` 分工不同：
+
+| | `deploy.sh` | `deploy-flow.sh` |
+|---|---|---|
+| 在哪跑 | 本地 / GitHub runner | **目标机本机** |
+| 传输 | ssh + rsync | 不需要，Runner 已把制品下载到本地 |
+| 做什么 | 构建 + 传输 + 重建 + 验健康 | 解压制品 + 换 jar + 重建 + 验健康 |
+
+云效的 Runner 装在这台机器上、主动往外连，所以这条链路**不需要公网开放 22 端口**，
+安全组可以收紧到只放行自己的 IP。脚本不碰 `.env`，API key 沿用 `deploy.sh` 写好的那份。
+
+
 ---
 
 ## 目录

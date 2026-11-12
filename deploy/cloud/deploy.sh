@@ -39,19 +39,30 @@ die() { printf '\033[31m[fatal]\033[0m %s\n' "$*" >&2; exit 1; }
 # jar 在本地打，不交给 2核2G 的服务器去跑 Maven：
 # 那边内存不够会被 OOM killer 直接杀掉，日志里只有一句 Killed，很难查。
 JAR="target/cls-news-0.1.0.jar"
-export JAVA_HOME="${CLS_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
-if [[ ! -f "$JAR" ]] || [[ -n "$(find src pom.xml -newer "$JAR" -type f -print -quit 2>/dev/null)" ]]; then
-  say "本地打包（源码比 jar 新，或 jar 不存在）"
-  mvn -q -B -DskipTests package || die "本地构建失败，先把编译错误修掉"
+if [[ -n "${CI:-}" ]]; then
+  # GitHub Actions 里 jar 由流水线的「打包」步骤产出，这里不重复构建。
+  # 顺带不设 JAVA_HOME —— 下面的默认值 /opt/homebrew/opt/openjdk 是 macOS 路径，
+  # 在 ubuntu runner 上不存在。
+  say "CI 环境：跳过本地构建（jar 来自流水线上一步）"
 else
-  say "jar 是最新的，跳过构建"
+  export JAVA_HOME="${CLS_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
+  if [[ ! -f "$JAR" ]] || [[ -n "$(find src pom.xml -newer "$JAR" -type f -print -quit 2>/dev/null)" ]]; then
+    say "本地打包（源码比 jar 新，或 jar 不存在）"
+    mvn -q -B -DskipTests package || die "本地构建失败，先把编译错误修掉"
+  else
+    say "jar 是最新的，跳过构建"
+  fi
 fi
 [[ -f "$JAR" ]] || die "构建后仍找不到 $JAR"
 
 # ---------- 1. 连通性 ----------
 say "检查 SSH 连通性 $HOST"
-ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" 'echo ok' >/dev/null 2>&1 \
-  || die "连不上 ${HOST}：确认 IP、SSH 密钥已配置（ssh-copy-id）、安全组放行了 22 端口。"
+if ! ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" 'echo ok' >/dev/null 2>&1; then
+  if [[ -n "${CI:-}" ]]; then
+    die "连不上 ${HOST}：检查仓库 Secrets 里的 SSH_HOST / SSH_KEY，以及安全组是否放行 22 端口（来源 0.0.0.0/0）。"
+  fi
+  die "连不上 ${HOST}：确认 IP、SSH 密钥已配置（ssh-copy-id）、安全组放行了 22 端口。"
+fi
 
 # ---------- 2. 远端 Docker ----------
 if ! ssh "$HOST" 'command -v docker' >/dev/null 2>&1; then

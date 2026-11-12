@@ -201,6 +201,75 @@ pending ──(原子认领)──> analyzing ──> done
 
 ---
 
+## 自动部署（GitHub Actions）
+
+`.github/workflows/deploy.yml`。推到 `main` 就跑，也可以手动触发（Run workflow）。
+
+**它和本地 `deploy.sh` 是同一份逻辑**，不是第二套：流水线只负责在 runner 上 `mvn package`，
+然后调 `deploy/cloud/deploy.sh`，脚本靠 `CI` 环境变量跳过「本地构建」那一段。
+维护两份部署脚本必然漂移，所以没有另写一份 CI 专用版本。
+
+### 三条决定了方案边界的实测事实
+
+| 事实 | 后果 |
+|---|---|
+| 目标机到 `registry-1.docker.io` 超时（实测 `000`） | **不能**「CI 构建镜像 → 推 Docker Hub → 服务器 pull」；基础镜像 `eclipse-temurin:17-jre` 靠远端本地缓存 |
+| 目标机 2 核 / 1740MB | 不能在上面跑 Maven，否则 OOM killer 只留一句 `Killed`；构建必须在 runner |
+| SQLite 单文件 + 单命名卷 `cls-news_cls-data` | 不能多实例、不能滚动更新；重启窗口约 20–40 秒，故 `concurrency` 不取消进行中的任务 |
+
+所以这条路是「CI 编译出 34MB 的 jar → rsync 上传 → 远端 `docker compose up -d --build`」，
+跟手敲脚本完全一致，只是不用再开终端。
+
+### 一次性配置
+
+**1. 生成部署专用密钥**（不要带 passphrase，CI 里没有交互终端）
+
+```bash
+ssh-keygen -t ed25519 -N '' -C 'gha-cls-news' -f ~/.ssh/cls-news-deploy
+ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
+```
+
+**2. 填 Secrets**（仓库 Settings → Secrets and variables → Actions → New repository secret）
+
+| 名称 | 值 | 必填 |
+|---|---|---|
+| `SSH_HOST` | `8.136.19.57`（**纯 IP，不要带 `root@`**，`ssh-keyscan` 不认） | 是 |
+| `SSH_KEY` | `cat ~/.ssh/cls-news-deploy` 的**全部内容**，含首尾 `-----BEGIN/END-----` 两行 | 是 |
+| `DEEPSEEK_API_KEY` | `sk-...` | 否。不配就沿用远端 `/opt/cls-news/.env` 里已有的 key |
+
+**3. 确认安全组**：阿里云控制台 → 该实例 → 安全组 → 入方向，22 端口来源必须是 `0.0.0.0/0`。
+主机侧已经全放开了（`sshd` 监听 `0.0.0.0:22`、`ufw` inactive、`iptables` 默认 ACCEPT，
+无 fail2ban），唯一可能挡住 GitHub runner 的就是安全组。之前能部署成功只能证明
+**你本地那个 IP** 进得来，不代表境外 runner 也进得来。
+
+### 运行一次会看到什么
+
+1. `mvn -B -DskipTests package`（首次约 2 分钟，有 Maven 缓存后 40 秒左右）
+2. 校验 `target/cls-news-0.1.0.jar` 是 Spring Boot fat jar（否则服务器上会报
+   `no main manifest attribute`，得翻半天日志）
+3. `ssh-keyscan` 写 `known_hosts`（不用 `StrictHostKeyChecking=no`，那个等于关掉中间人防护）
+4. 跑 `deploy.sh`：连通性 → docker 检查 → 复用远端 key → rsync → 写 `.env` → compose → healthz 轮询
+5. 失败时自动 `docker compose logs --tail=100` 打到 job 日志里 —— 不用等人有空 ssh 上去
+
+### 出问题先看哪
+
+| 现象 | 原因 |
+|---|---|
+| `连不上 ... 检查仓库 Secrets 里的 SSH_HOST / SSH_KEY` | 安全组没放行境外，或 `SSH_HOST` 带了 `root@` |
+| `ssh-keyscan 没拿到 ... host key` | 22 端口从公网不可达（安全组） |
+| `远端 .env 里的 DEEPSEEK_API_KEY 异常` | secret 没配且远端 `.env` 也被清过；补 secret 重跑 |
+| rsync 卡住直到 20 分钟超时 | 跨境链路问题；`ServerAliveInterval` 会让它早点失败而不是静默挂住 |
+| healthz 90 秒不就绪 | 看 job 末尾自动抓的日志；多数是 jar 起不来（内存/端口） |
+
+### 明确不做的事
+
+- **不推镜像仓库**：服务器拉不动 Docker Hub；要用 registry 得先接阿里云 ACR，收益不抵改造量。
+- **不自动回滚**：镜像 tag 固定 `cls-news:0.1.0`，旧镜像会被覆盖。要回滚就 `git revert` 后重新触发。
+- **不上 K8s / SAE / 函数计算**：有状态的单实例 + 本地 SQLite 卷，迁移成本远大于收益。
+- **不在服务器上编译**：1.7G 内存跑 Maven 必死，这条是踩过的坑。
+
+---
+
 ## 目录
 
 ```

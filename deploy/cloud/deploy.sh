@@ -11,7 +11,8 @@
 # 可覆盖的变量：
 #   REMOTE_DIR  远端目录，默认 /opt/cls-news
 #   HOST_PORT   宿主机端口，默认 8080
-#   APP_PASSWORD 访问密码；不传则沿用远端已有的，远端也没有就随机生成
+#   APP_PASSWORD 访问密码，默认 admin
+#   APP_USER     访问账号，默认 admin
 #
 set -euo pipefail
 
@@ -38,19 +39,33 @@ die() { printf '\033[31m[fatal]\033[0m %s\n' "$*" >&2; exit 1; }
 # jar 在本地打，不交给 2核2G 的服务器去跑 Maven：
 # 那边内存不够会被 OOM killer 直接杀掉，日志里只有一句 Killed，很难查。
 JAR="target/cls-news-0.1.0.jar"
-export JAVA_HOME="${CLS_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
-if [[ ! -f "$JAR" ]] || [[ -n "$(find src pom.xml -newer "$JAR" -type f -print -quit 2>/dev/null)" ]]; then
-  say "本地打包（源码比 jar 新，或 jar 不存在）"
-  mvn -q -B -DskipTests package || die "本地构建失败，先把编译错误修掉"
+if [[ -n "${CI:-}" ]]; then
+  # GitHub Actions 里 jar 由流水线的「打包」步骤产出，这里不重复构建。
+  # 顺带不设 JAVA_HOME —— 下面的默认值 /opt/homebrew/opt/openjdk 是 macOS 路径，
+  # 在 ubuntu runner 上不存在。
+  say "CI 环境：跳过本地构建（jar 来自流水线上一步）"
 else
-  say "jar 是最新的，跳过构建"
+  export JAVA_HOME="${CLS_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
+  if [[ ! -f "$JAR" ]] || [[ -n "$(find src pom.xml -newer "$JAR" -type f -print -quit 2>/dev/null)" ]]; then
+    say "本地打包（源码比 jar 新，或 jar 不存在）"
+    # 用 mvnw 而不是系统 mvn：Maven 版本锁在仓库里，不依赖本机装的是哪个版本。
+    # 之前就因为本机 3.5.9 编译 maven-compiler-plugin 3.14.0 直接失败。
+    [[ -x ./mvnw ]] || chmod +x ./mvnw
+    ./mvnw -q -B -DskipTests package || die "本地构建失败，先把编译错误修掉"
+  else
+    say "jar 是最新的，跳过构建"
+  fi
 fi
 [[ -f "$JAR" ]] || die "构建后仍找不到 $JAR"
 
 # ---------- 1. 连通性 ----------
 say "检查 SSH 连通性 $HOST"
-ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" 'echo ok' >/dev/null 2>&1 \
-  || die "连不上 ${HOST}：确认 IP、SSH 密钥已配置（ssh-copy-id）、安全组放行了 22 端口。"
+if ! ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" 'echo ok' >/dev/null 2>&1; then
+  if [[ -n "${CI:-}" ]]; then
+    die "连不上 ${HOST}：检查仓库 Secrets 里的 SSH_HOST / SSH_KEY，以及安全组是否放行 22 端口（来源 0.0.0.0/0）。"
+  fi
+  die "连不上 ${HOST}：确认 IP、SSH 密钥已配置（ssh-copy-id）、安全组放行了 22 端口。"
+fi
 
 # ---------- 2. 远端 Docker ----------
 if ! ssh "$HOST" 'command -v docker' >/dev/null 2>&1; then
@@ -60,35 +75,31 @@ fi
 say "检查远端 Docker 是否在跑"
 ssh "$HOST" 'docker info' >/dev/null 2>&1 || die "Docker 装了但没运行：ssh $HOST 'systemctl enable --now docker'"
 
-# ---------- 3. 复用远端已有的密码和 key ----------
-# 这一步很重要：每次部署都重新生成密码，十个同事的浏览器会集体 401，
-# 而他们只会觉得「你这工具又坏了」。
+# ---------- 3. 复用远端已有的 key ----------
 REMOTE_ENV="$REMOTE_DIR/.env"
-OLD_PW=""
-if ssh "$HOST" "test -f $REMOTE_ENV" 2>/dev/null; then
-  OLD_PW="$(ssh "$HOST" "grep '^APP_PASSWORD=' $REMOTE_ENV 2>/dev/null | cut -d= -f2-" || true)"
-fi
 
-if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-  REMOTE_HAS_KEY="$(ssh "$HOST" "grep -q '^DEEPSEEK_API_KEY=sk-' $REMOTE_ENV 2>/dev/null && echo yes || echo no" 2>/dev/null || echo no)"
-  if [[ "$REMOTE_HAS_KEY" != "yes" ]]; then
+# 这里必须把远端 key 先读进本地变量，不能在「写 .env 的管道内部」才去取。
+# 踩过的坑：写 .env 用 `cat > $REMOTE_ENV`，这个重定向在 SSH 连接一建立就把远端文件
+# 截断了；如果取 key 的 `ssh grep $REMOTE_ENV` 放在同一个管道的 else 分支里，
+# 读到的一定是刚被清空的文件，于是 key 静默丢失、analysisReady 变 false，
+# 而脚本第 3 步的「远端已有 key」检查是在截断之前跑的、照样通过 —— 极难察觉。
+API_KEY="${DEEPSEEK_API_KEY:-}"
+if [[ -z "$API_KEY" ]]; then
+  API_KEY="$(ssh "$HOST" "sed -n 's/^DEEPSEEK_API_KEY=//p' $REMOTE_ENV 2>/dev/null | head -1" 2>/dev/null || true)"
+  if [[ -z "$API_KEY" ]]; then
     die "没有 DEEPSEEK_API_KEY，远端也没有。带上再跑：DEEPSEEK_API_KEY=sk-xxxx $0 $HOST"
   fi
-  say "沿用远端已有的 DEEPSEEK_API_KEY"
+  say "沿用远端已有的 DEEPSEEK_API_KEY（${#API_KEY} 字符）"
 fi
 
-if [[ -n "${APP_PASSWORD:-}" ]]; then
-  APP_PW="$APP_PASSWORD"
-  say "使用传入的 APP_PASSWORD"
-elif [[ -n "$OLD_PW" ]]; then
-  APP_PW="$OLD_PW"
-  say "沿用远端已有的访问密码"
-else
-  APP_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-14)"
-  say "首次部署，生成随机访问密码"
-fi
-
+# 访问密码固定 admin/admin（可用 APP_PASSWORD 覆盖）。
+# 这里从「随机生成 + 沿用远端旧密码」改成固定值，是因为多人共用一个账号：
+# 每次部署重新生成，十个同事的浏览器会集体 401，而他们只会觉得「你这工具又坏了」；
+# 沿用旧密码又会让密码散落在每个人的历史记录里、自己都说不清是哪个。
+# 固定一个大家事先说好的，反而最省事。
+APP_PW="${APP_PASSWORD:-admin}"
 APP_USER_NAME="${APP_USER:-admin}"
+say "访问账号 ${APP_USER_NAME} / ${APP_PW}"
 
 # ---------- 4. 推代码 ----------
 say "同步代码到 $HOST:$REMOTE_DIR"
@@ -144,13 +155,16 @@ say "写入远端 .env"
   echo "MEM_LIMIT=$MEM_LIMIT"
   # 服务器只用运行镜像（见 deploy/cloud/Dockerfile.runtime 里的说明）
   echo "DOCKERFILE=deploy/cloud/Dockerfile.runtime"
-  if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
-    echo "DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
-  else
-    # 保留远端原有 key
-    ssh "$HOST" "grep '^DEEPSEEK_API_KEY=' $REMOTE_ENV 2>/dev/null" || true
-  fi
+  # key 已在上面读进 API_KEY（见第 3 步的注释），这里只负责写，不再回读远端文件
+  echo "DEEPSEEK_API_KEY=$API_KEY"
 } | ssh "$HOST" "cat > $REMOTE_ENV && chmod 600 $REMOTE_ENV"
+
+# 写后自检：不校验的话，key 丢了要等到有人点「分析」报 503 才发现
+WROTE_KEY_LEN="$(ssh "$HOST" "sed -n 's/^DEEPSEEK_API_KEY=//p' $REMOTE_ENV | head -1 | tr -d '\n' | wc -c" 2>/dev/null || echo 0)"
+if [[ "$WROTE_KEY_LEN" -lt 20 ]]; then
+  die "远端 .env 里的 DEEPSEEK_API_KEY 异常（长度 ${WROTE_KEY_LEN}），分析功能会不可用"
+fi
+say "远端 .env 已写入，key 长度 ${WROTE_KEY_LEN}"
 
 # ---------- 6. 构建并启动 ----------
 say "构建镜像并启动（运行镜像只拉 JRE，不跑 Maven）"

@@ -20,17 +20,16 @@ CONFIG="$PROJECT_DIR/deploy/laptop/config.env"
 JAR="$PROJECT_DIR/target/cls-news-0.1.0.jar"
 
 # ---------- 1. 本地配置 ----------
-# 不存在就生成一份随机密码。裸奔比麻烦更贵：这个工具存了财联社全文，
+# 不存在就生成一份，密码沿用全局约定 admin。裸奔比麻烦更贵：这个工具存了财联社全文，
 # 无鉴权暴露到公网等于做了个转贴站，版权风险是立刻兑现的。
 if [[ ! -f "$CONFIG" ]]; then
-  RAND_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-14)"
-  cat > "$CONFIG" <<EOF
+  cat > "$CONFIG" <<'EOF'
 # 本地配置，不要提交（.gitignore 已忽略）
 APP_USER=admin
-APP_PASSWORD=$RAND_PW
+APP_PASSWORD=admin
 EOF
   chmod 600 "$CONFIG"
-  echo "[init] 已生成随机密码并写入 $CONFIG"
+  echo "[init] 已写入默认账号密码 admin/admin 到 $CONFIG"
 fi
 
 set -a
@@ -57,7 +56,7 @@ if [[ ! -x "$JAVA_HOME/bin/java" ]]; then
 fi
 
 if [[ ! -f "$JAR" ]]; then
-  echo "[fatal] 缺少 $JAR，先执行：mvn -DskipTests package" >&2
+  echo "[fatal] 缺少 $JAR，先执行：./mvnw -DskipTests package" >&2
   exit 1
 fi
 

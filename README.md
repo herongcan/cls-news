@@ -24,9 +24,13 @@ Spring Boot 3 需要 17+）。要用别的 JDK：`CLS_JAVA_HOME=/path/to/jdk17 .
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk
-mvn -q package
+./mvnw -q package
 java -jar target/cls-news-0.1.0.jar
 ```
+
+> **用 `./mvnw` 而不是 `mvn`。** 项目自带 Maven Wrapper（3.9.9），首次执行会把 Maven 下到
+> `~/.m2/wrapper/dists/`，之后直接用。这样本地、GitHub Actions、云效跑的是同一个 Maven 版本，
+> 不会因为某台机器装的是 3.5.9 而编译失败——`spring-boot 3.5.4` 的 compiler 插件要求 ≥ 3.6.3。
 
 用 Docker 跑（推荐，环境全部固化）：
 
@@ -116,7 +120,7 @@ APP_AUTH=true APP_USER=admin APP_PASSWORD='你的密码' java -jar target/cls-ne
 | `app.analysis.max-tokens` | `2000` | **别调小**：推理型模型的思考过程也算在内，600 会让 JSON 被截断 |
 | `spring.task.scheduling.pool.size` | `4` | **别改回 1**：单线程时一个卡住的模型调用会把采集一起拖死 |
 | `app.security.enabled` | `false` | 环境变量 `APP_AUTH`。放公网必须 `true` |
-| `app.security.username` / `password` | `admin` / 空 | 环境变量 `APP_USER` / `APP_PASSWORD`。密码空 + 开启鉴权 = 启动失败 |
+| `app.security.username` / `password` | `admin` / `admin` | 环境变量 `APP_USER` / `APP_PASSWORD`。密码空 + 开启鉴权 = 启动失败 |
 | `spring.datasource.url` | `./data/news.db` | 环境变量 `DB_PATH`。容器里指向挂载卷 `/app/data/news.db` |
 
 关于频率：你说的是「半分钟爬一次」。我把两个 30 秒拆开了 —— **页面每 30 秒拉增量**
@@ -198,6 +202,89 @@ pending ──(原子认领)──> analyzing ──> done
 - 不把站点暴露到公网、不加登录分享给别人 —— 这是当前口径的前提；
 - 服务端 90 秒一轮，单轮 50 条，属于低频访问；UA / Referer 如实声明；
 - 若要改成公开访问，先把 `fulltext` 改成 `false`，并在页面上保留版权声明与原文链接。
+
+---
+
+## 自动部署（GitHub Actions）
+
+`.github/workflows/deploy.yml`。推到 `main` 就跑，也可以手动触发（Run workflow）。
+
+**它和本地 `deploy.sh` 是同一份逻辑**，不是第二套：流水线只负责在 runner 上 `./mvnw package`，
+然后调 `deploy/cloud/deploy.sh`，脚本靠 `CI` 环境变量跳过「本地构建」那一段。
+维护两份部署脚本必然漂移，所以没有另写一份 CI 专用版本。
+
+### 三条决定了方案边界的实测事实
+
+| 事实 | 后果 |
+|---|---|
+| 目标机到 `registry-1.docker.io` 超时（实测 `000`） | **不能**「CI 构建镜像 → 推 Docker Hub → 服务器 pull」；基础镜像 `eclipse-temurin:17-jre` 靠远端本地缓存 |
+| 目标机 2 核 / 1740MB | 不能在上面跑 Maven，否则 OOM killer 只留一句 `Killed`；构建必须在 runner |
+| SQLite 单文件 + 单命名卷 `cls-news_cls-data` | 不能多实例、不能滚动更新；重启窗口约 20–40 秒，故 `concurrency` 不取消进行中的任务 |
+
+所以这条路是「CI 编译出 34MB 的 jar → rsync 上传 → 远端 `docker compose up -d --build`」，
+跟手敲脚本完全一致，只是不用再开终端。
+
+### 一次性配置
+
+**1. 生成部署专用密钥**（不要带 passphrase，CI 里没有交互终端）
+
+```bash
+ssh-keygen -t ed25519 -N '' -C 'gha-cls-news' -f ~/.ssh/cls-news-deploy
+ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
+```
+
+**2. 填 Secrets**（仓库 Settings → Secrets and variables → Actions → New repository secret）
+
+| 名称 | 值 | 必填 |
+|---|---|---|
+| `SSH_HOST` | `8.136.19.57`（**纯 IP，不要带 `root@`**，`ssh-keyscan` 不认） | 是 |
+| `SSH_KEY` | `cat ~/.ssh/cls-news-deploy` 的**全部内容**，含首尾 `-----BEGIN/END-----` 两行 | 是 |
+| `DEEPSEEK_API_KEY` | `sk-...` | 否。不配就沿用远端 `/opt/cls-news/.env` 里已有的 key |
+
+**3. 确认安全组**：阿里云控制台 → 该实例 → 安全组 → 入方向，22 端口来源必须是 `0.0.0.0/0`。
+主机侧已经全放开了（`sshd` 监听 `0.0.0.0:22`、`ufw` inactive、`iptables` 默认 ACCEPT，
+无 fail2ban），唯一可能挡住 GitHub runner 的就是安全组。之前能部署成功只能证明
+**你本地那个 IP** 进得来，不代表境外 runner 也进得来。
+
+### 运行一次会看到什么
+
+1. `./mvnw -B -DskipTests package`（首次约 2 分钟，有 Maven 缓存后 40 秒左右）
+2. 校验 `target/cls-news-0.1.0.jar` 是 Spring Boot fat jar（否则服务器上会报
+   `no main manifest attribute`，得翻半天日志）
+3. `ssh-keyscan` 写 `known_hosts`（不用 `StrictHostKeyChecking=no`，那个等于关掉中间人防护）
+4. 跑 `deploy.sh`：连通性 → docker 检查 → 复用远端 key → rsync → 写 `.env` → compose → healthz 轮询
+5. 失败时自动 `docker compose logs --tail=100` 打到 job 日志里 —— 不用等人有空 ssh 上去
+
+### 出问题先看哪
+
+| 现象 | 原因 |
+|---|---|
+| `连不上 ... 检查仓库 Secrets 里的 SSH_HOST / SSH_KEY` | 安全组没放行境外，或 `SSH_HOST` 带了 `root@` |
+| `ssh-keyscan 没拿到 ... host key` | 22 端口从公网不可达（安全组） |
+| `远端 .env 里的 DEEPSEEK_API_KEY 异常` | secret 没配且远端 `.env` 也被清过；补 secret 重跑 |
+| rsync 卡住直到 20 分钟超时 | 跨境链路问题；`ServerAliveInterval` 会让它早点失败而不是静默挂住 |
+| healthz 90 秒不就绪 | 看 job 末尾自动抓的日志；多数是 jar 起不来（内存/端口） |
+
+### 明确不做的事
+
+- **不推镜像仓库**：服务器拉不动 Docker Hub；要用 registry 得先接阿里云 ACR，收益不抵改造量。
+- **不自动回滚**：镜像 tag 固定 `cls-news:0.1.0`，旧镜像会被覆盖。要回滚就 `git revert` 后重新触发。
+- **不上 K8s / SAE / 函数计算**：有状态的单实例 + 本地 SQLite 卷，迁移成本远大于收益。
+- **不在服务器上编译**：1.7G 内存跑 Maven 必死，这条是踩过的坑。
+
+### 另一条路：云效 Flow
+
+`deploy/cloud/deploy-flow.sh` 是给云效用的变体，和 `deploy.sh` 分工不同：
+
+| | `deploy.sh` | `deploy-flow.sh` |
+|---|---|---|
+| 在哪跑 | 本地 / GitHub runner | **目标机本机** |
+| 传输 | ssh + rsync | 不需要，Runner 已把制品下载到本地 |
+| 做什么 | 构建 + 传输 + 重建 + 验健康 | 解压制品 + 换 jar + 重建 + 验健康 |
+
+云效的 Runner 装在这台机器上、主动往外连，所以这条链路**不需要公网开放 22 端口**，
+安全组可以收紧到只放行自己的 IP。脚本不碰 `.env`，API key 沿用 `deploy.sh` 写好的那份。
+
 
 ---
 

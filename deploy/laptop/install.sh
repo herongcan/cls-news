@@ -16,7 +16,7 @@ chmod +x "$LAPTOP_DIR/start.sh"
 
 # ---------- 预检 ----------
 if [[ ! -f "$PROJECT_DIR/target/cls-news-0.1.0.jar" ]]; then
-  echo "[fatal] 缺少 jar，先执行：mvn -DskipTests package" >&2
+  echo "[fatal] 缺少 jar，先执行：./mvnw -DskipTests package" >&2
   exit 1
 fi
 

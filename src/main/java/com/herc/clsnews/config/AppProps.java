@@ -43,7 +43,10 @@ public class AppProps {
         /** 关掉时完全不拦截（本机开发用）。上线必须 true */
         private boolean enabled = false;
         private String username = "admin";
-        /** 留空则启动时直接失败，不允许「以为开了其实没密码」 */
+        /**
+         * 默认 admin（见 application.yml 的 ${APP_PASSWORD:admin}）。
+         * 代码里的默认值仍留空：留空时启动直接失败，不允许「以为开了鉴权其实没密码」。
+         */
         private String password = "";
         /** 健康检查不能要密码，否则 Docker/负载均衡永远判死 */
         private String[] permitPaths = {"/healthz"};
@@ -66,11 +69,20 @@ public class AppProps {
     }
 
     public static class Analysis {
-        /** 总开关：false 时 AnalysisWorker 这个 Bean 都不创建，一条都不会分析 */
+        /** 总开关：false 时连手动分析也拒绝，一条都不会分析 */
         private boolean enabled = false;
+        /**
+         * 后台自动消化 pending 队列。
+         *
+         * <p>默认 false：分析改由用户在页面上点「分析」触发。理由是成本 ——
+         * 采集约 550 条/天，全自动等于把没人在意的一半也送去模型；而且队列从旧往新跑，
+         * 首屏最新那几条反而最后才被分析，看起来像「随机漏分析」。
+         * 想要老的自动行为，把它设成 true 即可，两条链路共用同一个 Service。
+         */
+        private boolean auto = false;
         /** stub = 空实现（调用必然失败，用于识别「还没接」）；deepseek = 真实调用 */
         private String provider = "stub";
-        /** 每天最多分析多少条，防止配置错误把额度烧光 */
+        /** 每天最多分析多少条，防止误触把额度烧光。超限会明确报 429，不再静默跳过 */
         private int dailyCap = 300;
         /** 留空则依次回落到环境变量 DEEPSEEK_API_KEY、~/.codex/auth.json */
         private String apiKey = "";
@@ -83,6 +95,8 @@ public class AppProps {
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public boolean isAuto() { return auto; }
+        public void setAuto(boolean auto) { this.auto = auto; }
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
         public int getDailyCap() { return dailyCap; }

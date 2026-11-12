@@ -1,0 +1,164 @@
+name: deploy
+
+# 把 main 上的代码变成线上容器。
+#
+# 几个不是随手选的设定，改之前先看清原因：
+#
+#   1. 构建放在 runner 上，不放服务器。
+#      目标机是 2 核 / 1740MB，跑 mvn package 会被 OOM killer 杀掉，
+#      日志里只有一句 Killed，看着像网络问题其实查半天是内存。
+#
+#   2. 只传 34MB 的 jar，不走镜像仓库。
+#      这台 ECS 到 registry-1.docker.io 实测超时（连不通），
+#      「CI 推镜像 → 服务器 pull」这条路是死的。
+#      基础镜像 eclipse-temurin:17-jre 已经缓存在远端本地，本地 build 即可。
+#
+#   3. 不做滚动发布，也不并发。
+#      SQLite 单文件 + 单命名卷，只可能有一个实例；重启窗口约 20-40 秒。
+#      并发触发两个 compose up 会互相踩，所以 concurrency 不取消进行中的任务。
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 里配：
+#   SSH_HOST          纯 IP，不带 root@（如 8.136.19.57）
+#   SSH_KEY           部署私钥全文（ssh-keygen -t ed25519 -N '' 生成，不要带 passphrase）
+#   DEEPSEEK_API_KEY  可选。不配就沿用远端 /opt/cls-news/.env 里已有的 key。
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'deploy/laptop/**'
+      - 'tools/eval/**'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '发版原因（只写进运行记录，便于回溯）'
+        required: false
+        default: 'manual'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  # 不取消进行中的部署：中途 kill 会留下「代码已更新、容器还是旧的」的中间态，
+  # 比让后一次排队等 2 分钟糟糕得多。
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: 缓存 Maven Wrapper 下载的 Maven 本体
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/wrapper
+          key: mvnw-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+          restore-keys: mvnw-${{ runner.os }}-
+
+      # 不跑测试：这个仓库目前没有能挡住的测试用例，
+      # 让 CI 卡在形式上没意义的绿灯上只会让人习惯性忽略红灯。
+      # 用 ./mvnw：Maven 版本锁在仓库里，和本地、云效跑的是同一个版本。
+      - name: 打包
+        run: ./mvnw -B -DskipTests package
+
+      - name: 校验产物
+        run: |
+          JAR=target/cls-news-0.1.0.jar
+          if [ ! -f "$JAR" ]; then
+            echo "::error::打包后找不到 $JAR"
+            exit 1
+          fi
+          ls -lh "$JAR"
+          # 确认是 Spring Boot 可执行 fat jar。
+          # 不是的话服务器上会报 no main manifest attribute，得先往上翻日志才看得出来。
+          if ! unzip -l "$JAR" | grep -q 'BOOT-INF/'; then
+            echo "::error::$JAR 不是 Spring Boot fat jar，检查 spring-boot-maven-plugin 是否生效"
+            exit 1
+          fi
+
+      - name: 配置 SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_KEY" ]; then
+            echo "::error::Secrets 缺少 SSH_HOST 或 SSH_KEY（Settings → Secrets and variables → Actions）"
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+
+          # 用 keyscan 而不是 StrictHostKeyChecking=no：
+          # 后者会让中间人攻击完全无感，而这里连的是固定 IP、每天跑一次，
+          # keyscan 的额外开销可以忽略。
+          # 末尾的 || true 是必要的：某些主机不支持 rsa 算法时 keyscan 会返回非 0，
+          # 在 set -e 下会直接判 step 失败，而真正的错误信息被 2>/dev/null 吞掉了。
+          # 所以下面单独校验文件是否真的写进了东西。
+          touch ~/.ssh/known_hosts
+          ssh-keyscan -t ed25519,rsa -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::ssh-keyscan 没拿到 $SSH_HOST 的 host key，确认 22 端口从公网可达"
+            exit 1
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+          # 跨境链路上 SSH 空闲几十秒被中间设备掐掉很常见，
+          # 没有 ServerAlive 的话 rsync 传到一半会无声挂住直到 job 超时。
+          # ControlMaster 把 deploy.sh 里那十几次 ssh 复用到一条连接上，
+          # 跨境 RTT 下能省下好几秒的重复握手。
+          # 路径写 $HOME 展开后的绝对路径而不是 ~：ssh 的 ~ 展开依赖 passwd 里的
+          # home，runner 上千一和 $HOME 不一致时就不认了。
+          printf '%s\n' \
+            'Host *' \
+            "  IdentityFile $HOME/.ssh/id_deploy" \
+            '  IdentitiesOnly yes' \
+            '  ServerAliveInterval 15' \
+            '  ServerAliveCountMax 4' \
+            '  ControlMaster auto' \
+            "  ControlPath $HOME/.ssh/cm-%r@%h:%p" \
+            '  ControlPersist 120' \
+            > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+          ssh -o ConnectTimeout=15 "root@$SSH_HOST" 'echo "ssh ok: $(hostname)"'
+
+      # 部署逻辑本身完全复用本地脚本：8 个步骤（连通性 → docker 检查 → 复用 key
+      # → rsync → 写 .env → compose up → 健康检查 → 报告）本来就是幂等的。
+      # CI 环境变量会让它跳过「本地构建」那一段，其余一模一样。
+      - name: 部署
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          echo "触发原因：${REASON:-push 到 main}"
+          chmod +x deploy/cloud/deploy.sh
+          ./deploy/cloud/deploy.sh "root@$SSH_HOST"
+
+      # 失败了自动把远端日志打到 job 输出里。
+      # 否则得等人有空 ssh 上去，这段时间线上是坏的却没人知道坏在哪。
+      - name: 失败时抓远端日志
+        if: failure()
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          ssh -o ConnectTimeout=15 "root@$SSH_HOST" \
+            'cd /opt/cls-news 2>/dev/null && docker compose ps && echo "--- logs ---" && docker compose logs --tail=100' \
+            || echo "取日志也失败了，需人工登录排查"

@@ -22,3 +22,29 @@ CREATE TABLE IF NOT EXISTS news (
 
 CREATE INDEX IF NOT EXISTS idx_news_publish ON news (publish_time DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_news_status  ON news (analysis_status);
+
+-- 每次真正调用大模型记一行。
+-- 为什么不直接数 news.analyzed_at：同一行可以被「重新分析」多次，按行计数永远到不了上限，
+-- 而钱是一次一次花的。日配额必须按调用次数算，否则这个上限只是给人看的。
+CREATE TABLE IF NOT EXISTS analysis_call (
+    id      INTEGER PRIMARY KEY,
+    ts      INTEGER NOT NULL,                         -- epoch 秒
+    news_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_ts ON analysis_call (ts);
+
+-- 访客统计：按「IP + 日期」去重。
+-- 主键就是去重规则本身，所以「今日访客」= COUNT(*) WHERE day=?，
+-- 「总访客」= COUNT(DISTINCT ip)，不需要额外去重逻辑。
+-- hits 记的是当天这个 IP 打开页面的次数（PV），只存不展示，留着以后看趋势。
+CREATE TABLE IF NOT EXISTS visit (
+    ip       TEXT    NOT NULL,
+    day      TEXT    NOT NULL,                        -- yyyy-MM-dd，服务器本地时区
+    first_ts INTEGER NOT NULL,
+    last_ts  INTEGER NOT NULL,
+    hits     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (ip, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_visit_day ON visit (day);

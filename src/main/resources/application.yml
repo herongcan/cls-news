@@ -41,9 +41,15 @@ app:
     fulltext: true
 
   analysis:
-    # 大模型分析总开关。关掉之后一条都不会分析，采集照常
+    # 大模型分析总开关。关掉之后连手动点击也会被拒绝，采集照常
     enabled: true
+    # false = 只有用户点「分析」才调用模型（当前默认）
+    # true  = 抓进来就自动分析，等同于旧行为（pending 由后台每 10 秒消化）
+    # 为什么默认手动：采集约 550 条/天，全自动等于把没人在意的那一半也送去模型；
+    # 且队列从旧往新跑，首屏最新的几条反而最后才被分析，看起来像随机漏分析。
+    auto: false
     provider: deepseek    # deepseek | stub
+    # 手动模式下这个上限是防误触的保险，不是日常约束；超限会明确报 429，不再静默跳过
     daily-cap: 300
 
     # key 取值顺序：这里 → 环境变量 DEEPSEEK_API_KEY → ~/.codex/auth.json
@@ -66,7 +72,12 @@ app:
   security:
     enabled: ${APP_AUTH:false}
     username: ${APP_USER:admin}
-    password: ${APP_PASSWORD:}
+    # 默认 admin/admin。这是十来个同事共用的内网工具，密码说好一个固定的就够了，
+    # 每次部署随机生成反而会逼所有人把密码抄在便签上，安全性并不会更高。
+    # 代价是：知道地址的人试一下就能进。公网环境下至少改一位，或用 APP_PASSWORD 覆盖。
+    # 注意 APP_PASSWORD 显式设成空字符串**不会**回落到这个默认值，而是直接启动失败——
+    # 「以为开了鉴权、其实密码是空串」比明说没开更危险。
+    password: ${APP_PASSWORD:admin}
     permit-paths:
       - /healthz
 

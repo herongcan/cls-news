@@ -67,6 +67,45 @@ public class NewsStore {
         return n == null ? 0 : n;
     }
 
+    /**
+     * 关键词搜索：标题或正文命中即算，排序与游标沿用 {@link #before} 那一套。
+     *
+     * <p><b>为什么用 LIKE，而不给 title 建索引</b>——这问题值得写清楚，因为直觉通常是错的：
+     * <ul>
+     *   <li>{@code LIKE '%词%'} <b>用不上 B-tree 索引</b>。索引按前缀有序存放，
+     *       而这模式第一个字符就是通配符，意味着「任意位置都可能命中」，
+     *       有序性一点都用不到，优化器只能全表扫。建了索引也不会被选中，
+     *       白占空间、拖慢插入。能走索引的只有 `LIKE '词%'`（前缀匹配）。</li>
+     *   <li>FTS5 的 trigram 分词要求查询词 <b>至少 3 个字符</b>，而中文关键词
+     *       大多是两个字（回购、涨停、降息、减持），装上去反而搜不到；
+     *       unicode61 又把连续汉字当一个 token，同样做不了词级匹配。</li>
+     *   <li>实测：全表扫 441 行约 3ms，10 万行（每行 100 字正文）约 35ms。
+     *       这个量级不值得引入任何额外结构。</li>
+     * </ul>
+     * 真到百万行，再考虑 FTS5 自写 tokenizer 或独立搜索引擎。
+     *
+     * @param pattern 已转义并带首尾 % 的 LIKE 模式，由调用方构造（见 NewsController#likePattern）
+     * @param beforeId 游标上界（不含），传 {@code Long.MAX_VALUE} 表示从头开始
+     */
+    public List<News> search(String pattern, long beforeId, int limit) {
+        return jdbc.query("""
+                SELECT * FROM news
+                 WHERE (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')
+                   AND id < ?
+                 ORDER BY publish_time DESC, id DESC
+                 LIMIT ?
+                """, MAP, pattern, pattern, beforeId, limit);
+    }
+
+    /** 命中总数，前端用来显示「找到 N 条」。 */
+    public long countSearch(String pattern) {
+        Long n = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM news
+                 WHERE title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'
+                """, Long.class, pattern, pattern);
+        return n == null ? 0 : n;
+    }
+
     /** 全局最大 id，作为前端增量游标。用全局值而不是「本页最大值」，避免分页边界重复。 */
     public long maxId() {
         Long n = jdbc.queryForObject("SELECT COALESCE(MAX(id), 0) FROM news", Long.class);
@@ -100,6 +139,51 @@ public class NewsStore {
                 WHERE id IN (SELECT id FROM news WHERE analysis_status = 'pending' ORDER BY id ASC LIMIT ?)
                 RETURNING *
                 """, MAP, limit);
+    }
+
+    /**
+     * 单条原子认领。手动分析用，等价于 {@link #claimPending} 的「抢一条」版本。
+     *
+     * <p>为什么条件写 {@code analysis_status <> 'analyzing'} 而不是 {@code = 'pending'}：
+     * 界面只给「没结论」的条目按钮，但运维带 force=true 手工重算时已 done 的行也必须放行；
+     * 唯一要挡的是「已经有人在算」，否则两个人同时点同一条就是两次扣费。
+     *
+     * <p>返回空 Optional 有两种可能：id 不存在、或已被别的请求抢走 ——
+     * 调用方统一按「正在分析中」处理即可。
+     */
+    public Optional<News> claimOne(long id) {
+        return jdbc.query("""
+                UPDATE news SET analysis_status = 'analyzing'
+                WHERE id = ? AND analysis_status <> 'analyzing'
+                RETURNING *
+                """, MAP, id).stream().findFirst();
+    }
+
+    /** 记一次真实的大模型调用。日配额按这个数算，因为它才是钱。 */
+    public void recordCall(long newsId) {
+        jdbc.update("INSERT INTO analysis_call (ts, news_id) VALUES (?,?)",
+                Instant.now().getEpochSecond(), newsId);
+    }
+
+    /** 今天已经调用过多少次模型。跨重启准确，多实例共享同一份计数。 */
+    public long countCallsSince(long epochSecond) {
+        Long n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM analysis_call WHERE ts >= ?", Long.class, epochSecond);
+        return n == null ? 0 : n;
+    }
+
+    /** 清掉老的调用记录，避免这张表无限长。启动时跑一次就够。 */
+    public int pruneCalls(long beforeEpochSecond) {
+        return jdbc.update("DELETE FROM analysis_call WHERE ts < ?", beforeEpochSecond);
+    }
+
+    /** 按 id 批量查，给「同步已展示条目的分析状态」用。顺序不保证，调用方按 id 自己索引。 */
+    public List<News> findByIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        return jdbc.query("SELECT * FROM news WHERE id IN (" + placeholders + ")", MAP, ids.toArray());
     }
 
     /** 上次进程被杀/崩溃时留下的 analyzing 行，启动时打回 pending，否则这些条目永远卡住。 */

@@ -27,7 +27,11 @@
   h1{margin:0;font-size:15px;font-weight:500;letter-spacing:.2px}
   .sub{color:var(--dim);font-size:12px;border:.5px solid var(--line-2);
        border-radius:4px;padding:1px 6px}
-  .meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+  /* 状态项多了一组（访客）之后，窄屏会把每一项挤成两行（"已收录 / 190 条"），
+     读起来像表格。让每一项整体换行，而不是项内文字换行。 */
+  .meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;
+        flex-wrap:wrap;row-gap:4px}
+  .meta>span{white-space:nowrap}
   .meta b{color:var(--text);font-weight:500}
   button{background:transparent;border:.5px solid var(--line-2);color:var(--muted);
          font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:inherit}
@@ -39,13 +43,27 @@
   li.new{animation:flash 2.2s ease-out}
   @keyframes flash{0%{background:rgba(217,164,65,.10)}100%{background:transparent}}
   .time{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;
-        padding-top:2px;display:flex;flex-direction:column;gap:5px}
+        padding-top:2px;display:flex;flex-direction:column;gap:5px;align-items:flex-start}
+  /* 时间两行：上行时分秒、下行日期。竖着排是为了不撑宽那 56px 的窄列，
+     同时保证翻到前几天时一眼能看出是哪天（只给 HH:mm 的话跨日完全瞎） */
+  .time .stack{display:flex;flex-direction:column;line-height:1.3}
+  .time .dd{font-size:10px;color:var(--dim);opacity:.72;letter-spacing:.02em}
+  .time .dd.today{opacity:.9;color:var(--amber)}
   .lv{font-size:10px;line-height:1.4;text-align:center;border-radius:3px;
       padding:0 4px;width:fit-content;border:.5px solid var(--line-2);color:var(--dim)}
   .lv.a{color:var(--amber);border-color:rgba(217,164,65,.45)}
   .txt{margin:0;white-space:pre-wrap;word-break:break-word}
   a.title{color:var(--text);text-decoration:none;border-bottom:.5px solid transparent}
   a.title:hover{border-bottom-color:var(--line-2)}
+  /* 搜索命中高亮：半透明琥珀叠色 + color:inherit。
+     不要写成深色字配黄底 —— 整页是暗色，一条条纯黄块会非常刺眼；
+     color:inherit 保证链接本身的文字色不被覆盖。 */
+  .txt mark{background:rgba(217,164,65,.22);color:inherit;
+            padding:0 1px;border-radius:2px;box-decoration-break:clone}
+  /* 命中在正文、标题里没有关键词时给个说明，
+     否则用户会觉得「搜出来了却一个字都没高亮，是不是坏了」 */
+  .hit-note{font-size:10px;color:var(--dim);border:.5px solid var(--line-2);
+            border-radius:3px;padding:0 4px;margin-left:6px;white-space:nowrap}
   .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
   .chip{font-size:11px;color:var(--muted);border:.5px solid var(--line-2);
         border-radius:4px;padding:1px 6px;display:inline-flex;align-items:center;gap:4px;
@@ -54,12 +72,23 @@
   a.chip:hover{border-color:#3b414c;color:var(--text);background:rgba(255,255,255,.03)}
   .chip .code{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
   a.chip:hover .code{color:var(--muted)}
-  .ana{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+  /* min-height 用来占位：从「分析」按钮变成结论时行高不变，列表不会往下抖 */
+  .ana{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;min-height:22px}
   .pill{font-size:11px;padding:1px 7px;border-radius:4px;border:.5px solid}
   .pill.up{color:var(--up);border-color:rgba(229,72,77,.45)}
   .pill.down{color:var(--down);border-color:rgba(47,166,106,.45)}
   .pill.flat{color:var(--muted);border-color:var(--line-2)}
   .why{font-size:12px;color:var(--muted)}
+  /* 分析按钮：默认低调，hover 才亮，避免整页都是按钮抢走新闻本身的注意力 */
+  button.act{font-size:11px;padding:1px 8px;border-radius:4px;line-height:1.7;
+             display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+  button.act:hover{background:rgba(255,255,255,.03)}
+  button.act:disabled{opacity:.55;cursor:default;border-color:var(--line-2)}
+  button.act.err{color:var(--up);border-color:rgba(229,72,77,.4)}
+  .spin{width:10px;height:10px;flex:none;display:inline-block;border:1.5px solid var(--line-2);
+        border-top-color:var(--muted);border-radius:50%;animation:spin .7s linear infinite}
+  .note{font-size:11px;color:var(--dim)}
+  .note.err{color:var(--up)}
   #empty{padding:60px 0;text-align:center;color:var(--dim);font-size:13px}
   /* 瀑布流底部状态：三种态各自有颜色，用户不用猜是"卡住了"还是"到底了" */
   #more{padding:22px 0;text-align:center;font-size:12px;color:var(--dim);
@@ -78,11 +107,59 @@
                text-underline-offset:4px;text-decoration-color:var(--line-2)}
   #more.manual:hover{color:var(--text);text-decoration-color:#3b414c}
   #sentinel{height:1px}
+  /* 搜索栏单独一行，不塞进 header 的 meta 区 —— 那一块在窄屏已经换行，
+     再放输入框会挤成三行。 */
+  #searchbar{max-width:920px;margin:0 auto;padding:0 20px 12px;display:flex;gap:8px}
+  #q{flex:1;min-width:0;background:var(--panel);border:.5px solid var(--line);
+     border-radius:8px;color:var(--text);font-size:14px;line-height:1.4;padding:9px 12px;
+     font-family:inherit;outline:none;-webkit-appearance:none;appearance:none}
+  #q::placeholder{color:var(--dim)}
+  #q:focus{border-color:var(--line-2)}
+  /* 桌面 14px 合适；手机上必须 16px，否则 iOS Safari 聚焦时会把整页放大且不还原 */
+  @media (max-width:640px){#q{font-size:16px}}
+  #qclear{background:transparent;border:.5px solid var(--line-2);border-radius:8px;
+          color:var(--muted);font-size:12px;padding:0 12px;cursor:pointer;font-family:inherit}
+  #qclear:hover{color:var(--text)}
+  #qclear[hidden]{display:none}
   footer{max-width:920px;margin:0 auto;padding:0 20px 40px;
          color:var(--dim);font-size:11px;line-height:1.8}
+  /* 登录层：移动端浏览器不弹 Basic 原生框，凭证只能由页面自己收。
+     全屏铺满、跟列表同一套配色，免得看起来像「跳到了别的网站」。 */
+  #gate{position:fixed;inset:0;z-index:100;background:var(--bg);
+        display:flex;align-items:center;justify-content:center;padding:24px}
+  #gate[hidden]{display:none}
+  #gateForm{width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px}
+  .gate-title{font-size:18px;font-weight:500;letter-spacing:.3px}
+  .gate-sub{color:var(--dim);font-size:12px;margin-bottom:10px}
+  /* 16px 是硬要求：iOS Safari 遇到字号小于 16px 的 input 会自动放大整页，
+     而且不会自己缩回去，登录完列表就是糊的。 */
+  #gate input{background:var(--panel);border:.5px solid var(--line-2);border-radius:8px;
+              color:var(--text);font-size:16px;line-height:1.2;padding:11px 13px;
+              font-family:inherit;outline:none;-webkit-appearance:none;appearance:none}
+  #gate input:focus{border-color:#3b414c}
+  #gate button{margin-top:4px;background:var(--text);border:none;border-radius:8px;
+               color:#0a0b0d;font-size:15px;font-weight:500;padding:11px;cursor:pointer}
+  #gate button:hover{color:#0a0b0d;border:none}
+  #gate button:disabled{opacity:.55;cursor:default}
+  .gate-err{color:var(--up);font-size:12px;min-height:18px;text-align:center}
 </style>
 </head>
 <body>
+
+<!-- 登录层默认显示，拿到有效凭证后再隐藏。
+     放这里而不是靠 JS 动态创建，是为了首屏就有东西，不会先闪一下空白列表。 -->
+<div id="gate">
+  <form id="gateForm" novalidate>
+    <div class="gate-title">财联社电报</div>
+    <div class="gate-sub">内部工具 · 请输入账号密码</div>
+    <input id="gu" type="text" placeholder="账号" autocomplete="username"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+    <input id="gp" type="password" placeholder="密码" autocomplete="current-password">
+    <button id="gbtn" type="submit">进入</button>
+    <div id="gerr" class="gate-err"></div>
+  </form>
+</div>
+
 <header>
   <div class="brand">
     <span class="dot" id="live"></span>
@@ -92,12 +169,21 @@
   <div class="meta">
     <span>已收录 <b id="count">0</b> 条</span>
     <span>·</span>
+    <span id="visits" title="按 IP 去重，同一 IP 一天只算一个访客">今日访客 <b id="vToday">0</b> · 累计 <b id="vTotal">0</b></span>
+    <span>·</span>
+    <span id="anaToday">今日调用 0</span>
+    <span>·</span>
     <span id="last">等待首次抓取</span>
     <button id="refresh">立即刷新</button>
   </div>
 </header>
 
 <main>
+  <div id="searchbar">
+    <input id="q" type="search" placeholder="搜索标题或正文…" autocomplete="off"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button id="qclear" type="button" hidden>清除</button>
+  </div>
   <div id="empty">正在抓取首批数据…</div>
   <ul id="list"></ul>
   <div id="more"></div>
@@ -107,7 +193,10 @@
 <footer>
   个人自用 · 内容版权归财联社所有，仅做本地研究，不对外转载<br>
   服务端每 <span id="iv">90</span> 秒抓取一次，页面每 30 秒拉一次增量；
-  向下滚动自动加载更早的记录，点击股票标签可跳转行情页
+  向下滚动自动加载更早的记录，点击股票标签可跳转行情页<br>
+  大模型分析为手动触发：只有还没结论的条目才有「分析」按钮，已出结果的不再提供重算入口<br>
+  两个人同时点同一条只会算一次调用，另一个人直接拿到对方的结果<br>
+  访客数按 IP 去重：同一 IP 一天只算一次，同一出口 IP 下的多个人会被算作一个
 </footer>
 
 <script>
@@ -123,6 +212,94 @@
   const ivEl = document.getElementById('iv');
   const moreEl = document.getElementById('more');
   const sentinel = document.getElementById('sentinel');
+  const anaTodayEl = document.getElementById('anaToday');
+  const vTodayEl = document.getElementById('vToday');
+  const vTotalEl = document.getElementById('vTotal');
+  const qEl = document.getElementById('q');
+  const qClearEl = document.getElementById('qclear');
+
+  // ---------- 登录 ----------
+  // 为什么不用浏览器原生的 Basic 弹窗：移动端（微信、QQ、UC 的内置内核，以及不少
+  // Android WebView）收到 401 根本不弹框，而是把「需要登录」渲染成一张白页。
+  // 所以服务端把 index.html 放行，登录框做在页面里，凭证 Base64 之后塞进 Authorization。
+  const AUTH_KEY = 'cls.auth';
+  const gateEl = document.getElementById('gate');
+  const gateForm = document.getElementById('gateForm');
+  const gateUser = document.getElementById('gu');
+  const gatePass = document.getElementById('gp');
+  const gateBtn = document.getElementById('gbtn');
+  const gateErr = document.getElementById('gerr');
+
+  let authToken = '';
+  // 无痕模式 / 隐私设置可能直接禁掉 localStorage，读不到就当没登录过，别让整页崩掉
+  try { authToken = localStorage.getItem(AUTH_KEY) || ''; } catch (_) { /* 忽略 */ }
+
+  /** btoa 只吃 Latin-1，密码里一旦有中文就抛异常，先按 UTF-8 转成字节。 */
+  function b64(s) {
+    const bytes = new TextEncoder().encode(s);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
+  function forget() {
+    authToken = '';
+    try { localStorage.removeItem(AUTH_KEY); } catch (_) { /* 忽略 */ }
+  }
+
+  function showGate(msg) {
+    gateErr.textContent = msg || '';
+    gateEl.hidden = false;
+    // 只在桌面自动聚焦：手机上聚焦会立刻顶起键盘，把整个表单顶出视口
+    if (!/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) gateUser.focus();
+  }
+
+  /**
+   * 所有 API 请求的统一出口。
+   * 401 就地处理：清掉失效凭证、亮登录层、抛 UNAUTHORIZED。
+   * 调用方只要别把 UNAUTHORIZED 当成「网络故障」渲染成红字就行。
+   */
+  async function api(url, opts) {
+    const o = Object.assign({ cache: 'no-store' }, opts || {});
+    o.headers = Object.assign({}, o.headers || {});
+    if (authToken) o.headers['Authorization'] = 'Basic ' + authToken;
+    const res = await fetch(url, o);
+    if (res.status === 401) {
+      forget();
+      showGate('请先登录');
+      throw new Error('UNAUTHORIZED');
+    }
+    return res;
+  }
+
+  gateForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const u = gateUser.value.trim();
+    const p = gatePass.value;
+    if (!u) { gateErr.textContent = '请输入账号'; gateUser.focus(); return; }
+    gateBtn.disabled = true;
+    gateBtn.textContent = '验证中…';
+    gateErr.textContent = '';
+    const token = b64(u + ':' + p);
+    try {
+      // 先拿 /api/status 试一次再落盘：否则错密码也会被存下来，
+      // 下次打开要先失败一次才弹框，看起来像「页面坏了」。
+      const res = await fetch('/api/status', {
+        cache: 'no-store', headers: { Authorization: 'Basic ' + token }
+      });
+      if (!res.ok) { gateErr.textContent = '账号或密码不对'; return; }
+      authToken = token;
+      try { localStorage.setItem(AUTH_KEY, token); } catch (_) { /* 忽略 */ }
+      gatePass.value = '';
+      gateEl.hidden = true;
+      start();
+    } catch (_) {
+      gateErr.textContent = '连不上服务器，检查网络后重试';
+    } finally {
+      gateBtn.disabled = false;
+      gateBtn.textContent = '进入';
+    }
+  });
 
   let maxId = 0;            // 增量游标：全局最大 id，由服务端给
   let minId = 0;            // 翻页游标：列表里最旧一条的 id
@@ -132,10 +309,46 @@
   let loadingMore = false;  // 翻页请求进行中
   let paging = false;       // 是否已经向下翻过历史
   let touched = false;      // 用户是否真的滚动过（用来守住「首屏只 10 条」）
+  let searchMode = false;   // 当前列表展示的是不是搜索结果
+  let searchKw = '';        // 正在展示的关键词：翻页要带回、高亮要用它
+                            // 必须是「结果对应的」词，不能用输入框实时值 ——
+                            // 输入框打到一半时列表还是上一份结果，用新词高亮会张冠李戴
+  let searchTotal = 0;      // 命中总数，用于「共 N 条」
+  let searchSeq = 0;        // 请求序号：丢弃过期响应
+  let searchTimer = 0;      // 输入防抖
+
+  // id -> 条目原始数据。点击分析后要用它做增量更新，
+  // 而不是靠读 DOM 反推——DOM 里已经没有了原始字段。
+  const itemsById = new Map();
 
   const esc = s => String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+
+  /**
+   * 关键词高亮，返回可以直接塞进 innerHTML 的字符串。
+   *
+   * 两种直觉写法都是错的，这是本函数存在的全部原因：
+   *   1. 先拼 <mark> 再 esc —— 标签自己被转义成 &lt;mark&gt;，页面上直接显示字符
+   *   2. 先 esc 全文再找关键词 —— 关键词含 & < " 时原文已是 &amp;/&lt;，定位不到
+   * 正确做法：按关键词把原文切成片段，每段单独 esc，<mark> 只拼在段与段之间。
+   *
+   * split 传捕获组时，返回数组的奇数位就是被捕获的分隔符（即命中的那一段），
+   * 这是唯一需要理解的技巧，其余都是照常转义。
+   *
+   * @param text 原文（未转义）
+   * @param kw   当前展示结果对应的关键词；为空则退化成纯 esc
+   */
+  function hl(text, kw) {
+    const t = String(text == null ? '' : text);
+    const q = String(kw == null ? '' : kw).trim();
+    if (!q) return esc(t);
+    // 元字符必须转义：用户搜 "(" 或 "[" 会让 RegExp 直接抛 SyntaxError，整页白屏
+    const re = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    return t.split(re)
+        .map((seg, i) => (i % 2 ? '<mark>' + esc(seg) + '</mark>' : esc(seg)))
+        .join('');
+  }
 
   function hhmmss(sec) {
     const d = new Date(sec * 1000);
@@ -143,7 +356,54 @@
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
-  function sentimentPill(a) {
+  /** 本地日期键 YYYY-MM-DD。用于判断「是不是同一天」，不依赖浏览器时区实现细节。 */
+  function dayKey(d) {
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  /**
+   * 时间列第二行的日期标签。
+   *
+   * <p>列表是瀑布流，一直往下翻能翻到几天前，只给 HH:mm 会完全失去日期感
+   * —— 昨天 18:30 和今天 18:30 长得一模一样。
+   *
+   * <p>分级显示是为了在 56px 的窄列里塞下又不啰嗦：
+   * 今天/昨天用词，今年内省掉年份，跨年才把年份补上。
+   */
+  function fmtDay(sec) {
+    const d = new Date(sec * 1000);
+    const now = new Date();
+    const key = dayKey(d);
+    if (key === dayKey(now)) return { text: '今天', today: true };
+    const y = new Date(now.getTime());
+    y.setDate(y.getDate() - 1);
+    if (key === dayKey(y)) return { text: '昨天', today: false };
+    const md = (d.getMonth() + 1) + '/' + d.getDate();
+    if (d.getFullYear() === now.getFullYear()) return { text: md, today: false };
+    // 跨年：25/11/10。两位年份够用且不撑破列宽，完整年份留给 hover
+    return { text: String(d.getFullYear()).slice(2) + '/' + md, today: false };
+  }
+
+  /** hover 提示用完整时间。日期标签做了省略，这里必须给全。 */
+  function fullTs(sec) {
+    const d = new Date(sec * 1000);
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+        ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  /** 顶栏用的短时间戳：今天只给时分，非今天补日期。页面开着过夜也不会误读成今天。 */
+  function stampShort(sec) {
+    const day = fmtDay(sec);
+    const d = new Date(sec * 1000);
+    const p = n => String(n).padStart(2, '0');
+    const hm = p(d.getHours()) + ':' + p(d.getMinutes());
+    return day.today ? hm : day.text + ' ' + hm;
+  }
+
+  /** 结论部分：方向 + 置信度 + 一句话理由。没有分析结果时返回空串。 */
+  function pillHtml(a) {
     if (!a) return '';
     const s = a.sentiment || 'neutral';
     const cls = s === 'bullish' ? 'up' : s === 'bearish' ? 'down' : 'flat';
@@ -151,7 +411,35 @@
     const conf = typeof a.confidence === 'number'
         ? ' ' + Math.round(a.confidence * 100) + '%' : '';
     const why = a.summary ? '<span class="why">' + esc(a.summary) + '</span>' : '';
-    return '<div class="ana"><span class="pill ' + cls + '">' + label + conf + '</span>' + why + '</div>';
+    return '<span class="pill ' + cls + '">' + label + conf + '</span>' + why;
+  }
+
+  /**
+   * 操作区：只有「还没结论」的条目才有按钮。
+   * analyzing 必须显示「分析中」而不是可点的按钮 —— 否则用户会以为没生效，反复点。
+   *
+   * 有一条新闻已经得出利好/利空之后，这里什么都不渲染。
+   * 理由：同样的输入再喂一遍模型，答案基本不会变，点一次就是白花一次钱；
+   * 而「改了 prompt / 换了模型想重算」是运维动作，走
+   * POST /api/analysis/retry-failed 或带 force=true 的接口手工触发，不该摆在每条新闻旁边。
+   * failed 是例外：那不是重算，是这次没成功，得给人一个再试的入口。
+   */
+  function actionHtml(n) {
+    const st = n.analysisStatus || 'pending';
+    if (st === 'analyzing') {
+      return '<button class="act" disabled><span class="spin"></span>分析中</button>';
+    }
+    if (st === 'failed') {
+      return '<button class="act err" data-act="analyze">重试分析</button>';
+    }
+    if (n.analysis) {
+      return '';
+    }
+    return '<button class="act" data-act="analyze">分析</button>';
+  }
+
+  function anaHtml(n) {
+    return pillHtml(n.analysis) + actionHtml(n);
   }
 
   // 东方财富行情页：实测 sh/sz/bj 前缀的个股与指数都能直接打开。
@@ -169,35 +457,78 @@
 
   function render(n, isNew) {
     const li = document.createElement('li');
+    li.dataset.id = n.id;
     if (isNew) li.className = 'new';
+    itemsById.set(n.id, n);
     const lv = (n.level || '').toUpperCase();
     const lvHtml = (lv === 'A' || lv === 'B')
         ? '<span class="lv a">' + lv + '</span>' : '';
     const stocks = (n.stocks || []).map(stockChip).join('');
 
+    const day = fmtDay(n.time);
+    // 注意：页面渲染的是 n.text（正文，fulltext=false 时是 60 字摘要），不是 n.title。
+    // 后端搜的是 title OR content，于是出现三种情况：
+    //   1. 正文含关键词 —— 正常标亮（最常见）
+    //   2. 只在标题里 —— 正文里一个字都没有，不说明的话看着就像搜错了
+    //   3. 正文被截断在关键词之前 —— 前端拿不到完整正文，判断不了，也会落到情况 2
+    // 情况 2/3 都只给一句说明，不拉全文：拉全文要改接口，还会顶高行高、搅乱瀑布流裁剪。
+    const kw = searchKw;
+    const shownHit = !kw || String(n.text || '').toLowerCase().includes(kw.toLowerCase());
+    const hitNote = shownHit ? '' :
+        '<span class="hit-note" title="关键词出现在标题里；此处展示的是正文">标题命中</span>';
     li.innerHTML =
-      '<div class="time">' + hhmmss(n.time) + lvHtml + '</div>' +
+      '<div class="time" title="' + fullTs(n.time) + '">' +
+        '<span class="stack">' +
+          '<span class="hh">' + hhmmss(n.time) + '</span>' +
+          '<span class="dd' + (day.today ? ' today' : '') + '">' + day.text + '</span>' +
+        '</span>' + lvHtml + '</div>' +
       '<div>' +
         '<p class="txt"><a class="title" href="' + esc(n.url) + '" target="_blank" rel="noopener">'
-          + esc(n.text) + '</a></p>' +
+          + hl(n.text, kw) + '</a>' + hitNote + '</p>' +
         (stocks ? '<div class="chips">' + stocks + '</div>' : '') +
-        sentimentPill(n.analysis) +
+        '<div class="ana" data-ana>' + anaHtml(n) + '</div>' +
       '</div>';
     return li;
+  }
+
+  /**
+   * 单条原地更新。分析结果回来只改这一行的分析区，
+   * 不重排整个列表 —— 重排会让用户正在读的位置跳走，也丢失其余行的瞬时状态。
+   */
+  function applyItem(item) {
+    if (!item || !item.id) return;
+    itemsById.set(item.id, item);
+    const li = listEl.querySelector('li[data-id="' + item.id + '"]');
+    if (!li) return;
+    const ana = li.querySelector('[data-ana]');
+    if (ana) ana.innerHTML = anaHtml(item);
   }
 
   function applyStats(st) {
     if (!st) return;
     countEl.textContent = st.total != null ? st.total : 0;
+    if (st.visitToday != null) vTodayEl.textContent = st.visitToday;
+    if (st.visitTotal != null) vTotalEl.textContent = st.visitTotal;
     if (st.intervalMs) ivEl.textContent = Math.round(st.intervalMs / 1000);
     if (st.source) srcEl.textContent = st.source;
+    if (st.analyzedToday != null) {
+      anaTodayEl.textContent = '今日调用 ' + st.analyzedToday +
+          (st.analysisCap != null ? '/' + st.analysisCap : '');
+      if (st.analysisCapped) {
+        anaTodayEl.title = '今日分析已达上限，明天再试';
+        anaTodayEl.style.color = 'var(--amber)';
+      } else {
+        anaTodayEl.title = st.analysisAuto ? '后台自动分析' : '手动点击分析';
+        anaTodayEl.style.color = '';
+      }
+    }
     if (st.lastError) {
       liveEl.className = 'dot err';
       lastEl.textContent = '抓取失败，重试中';
       lastEl.title = st.lastError;
     } else if (st.lastRunAt) {
       liveEl.className = 'dot ok';
-      lastEl.textContent = '最近抓取 ' + hhmmss(st.lastRunAt);
+      lastEl.textContent = '最近抓取 ' + stampShort(st.lastRunAt);
       lastEl.title = '';
     }
   }
@@ -223,7 +554,182 @@
     }
   }
 
+  // ---------- 分析（手动触发）----------
+
+  /** AbortSignal.timeout 在旧内核里没有，退回手写定时器 */
+  function timeoutSignal(ms) {
+    if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
+    const c = new AbortController();
+    setTimeout(() => c.abort(), ms);
+    return c.signal;
+  }
+
+  function setAna(li, html) {
+    const ana = li.querySelector('[data-ana]');
+    if (ana) ana.innerHTML = html;
+  }
+
+  async function doAnalyze(li) {
+    const id = Number(li.dataset.id);
+    const n = itemsById.get(id);
+    if (!n) return;
+    setAna(li, '<span class="spin"></span><span class="note">模型分析中…</span>');
+    try {
+      const res = await api('/api/news/' + id + '/analyze',
+          { method: 'POST', signal: timeoutSignal(40000) });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 409) {
+        // 同事正在分析同一条。不重复调用，等几秒直接取他要出来的那份结果。
+        setAna(li, '<span class="note">同事正在分析这条…</span>');
+        setTimeout(() => refreshOne(id), 3000);
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+
+      applyItem(data.item);
+    } catch (e) {
+      if (e.message === 'UNAUTHORIZED') return;   // 登录层已经盖上，别再往行里写红字
+      const timeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+      const msg = timeout ? '等待超时，稍后自动取结果' : (e.message || '请求失败');
+      setAna(li, '<span class="note err">' + esc(msg) + '</span>' +
+                 '<button class="act err" data-act="analyze">重试</button>');
+      // 超时 ≠ 失败：服务端可能还在跑，几秒后回头查一次，别让用户白等一遍再重花钱
+      if (timeout) setTimeout(() => refreshOne(id), 6000);
+    }
+  }
+
+  /** 拉单条最新状态。用于「别人正在分析」「请求超时」这两条兜底路径。 */
+  async function refreshOne(id) {
+    try {
+      const res = await api('/api/news/' + id);
+      if (!res.ok) return;
+      applyItem(await res.json());
+    } catch (_) { /* 网络抖动就等下一轮 */ }
+  }
+
+  /**
+   * 同步「已经渲染在屏幕上的条目」的分析状态。
+   *
+   * 为什么需要：增量轮询只拉 since=最大 id 的新条目，永远不会重看旧行。
+   * 10 个人共用一个账号时，同事分析了第 120 条，你屏幕上那条会一直空着，
+   * 看起来像「他那边能分析、我这边不行」。这里只传 id，不传正文，代价很小。
+   */
+  async function syncStates() {
+    const ids = [...listEl.children].map(li => li.dataset.id).filter(Boolean);
+    if (!ids.length) return;
+    try {
+      const res = await api('/api/analysis/state?ids=' + ids.slice(0, 120).join(','));
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = data.items || {};
+      Object.keys(items).forEach(key => {
+        const id = Number(key);
+        const cur = itemsById.get(id);
+        const st = items[key];
+        if (!cur || !st) return;
+        if (cur.analysisStatus === st.status &&
+            JSON.stringify(cur.analysis || null) === JSON.stringify(st.analysis || null)) {
+          return;   // 没变，不动 DOM
+        }
+        applyItem(Object.assign({}, cur, { analysisStatus: st.status, analysis: st.analysis }));
+      });
+    } catch (_) { /* 静默失败：下一轮再说 */ }
+  }
+
+  // ---------- 搜索 ----------
+  // 搜索不另开页面，而是接管当前列表：搜完最常见的动作是「继续往下看」，
+  // 跳页会打断。代价是三处状态必须显式管好，否则会出现很难复现的串台：
+  //   1. 30 秒增量轮询要停 —— 不停的话搜索结果会在半分钟后被新抓的新闻覆盖
+  //   2. 翻页要换接口，但游标（minId）逻辑完全一样，所以复用的其实是同一套
+  //   3. 输入变化快时旧请求可能后到，用序号丢弃，避免「搜 A 显示 B 的结果」
+
+  async function runSearch(raw) {
+    const kw = (raw || '').trim();
+    const seq = ++searchSeq;
+
+    if (!kw) {
+      // 清空 = 回到正常列表。用 reset 而不是「只清列表」，
+      // 因为增量游标 maxId 在搜索期间没更新过，直接 pull 会重复拉一批旧数据。
+      if (searchMode) resetList();
+      return;
+    }
+
+    searchMode = true;
+    searchKw = kw;
+    // 搜索模式下这些「普通列表」的状态没意义，先归零，免得 loadMore 拿旧游标去翻普通列表
+    polling = false;
+    loadingMore = false;
+    paging = false;
+    touched = false;
+    setMore('loading');
+
+    try {
+      const res = await api('/api/news/search?q=' + encodeURIComponent(kw) + '&limit=' + PAGE);
+      if (seq !== searchSeq) return;            // 已经有更新的关键词了，这份结果作废
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (seq !== searchSeq) return;
+
+      const items = data.items || [];
+      searchTotal = data.total || 0;
+      listEl.innerHTML = '';
+      itemsById.clear();
+      items.forEach(n => listEl.appendChild(render(n, false)));
+      qClearEl.hidden = false;
+
+      // 关键：置 false，否则 loadMore 的第一道闸（firstLoad）会把搜索翻页全拦掉
+      firstLoad = false;
+
+      if (items.length) {
+        minId = items[items.length - 1].id;      // 倒序返回，最后一条最旧
+        hasMore = data.hasMore === true;
+        emptyEl.style.display = 'none';
+        setMore(hasMore ? 'idle' : 'end');
+        if (!hasMore) {
+          moreEl.textContent = '「' + searchKw + '」共 ' + searchTotal + ' 条';
+        }
+        // 一页没撑满视口时页面滚不动，滚动事件永远不会触发，得给个可点的入口
+        if (hasMore) setTimeout(maybePromptMore, 350);
+      } else {
+        minId = 0;
+        hasMore = false;
+        setMore('');
+        emptyEl.textContent = '没有匹配「' + kw + '」的记录';
+        emptyEl.style.display = '';
+      }
+    } catch (e) {
+      if (seq !== searchSeq) return;
+      if (e.message === 'UNAUTHORIZED') return;  // 登录层已弹，不再叠一层报错
+      setMore('error', e.message);
+    }
+  }
+
+  /** 退出搜索，重新走一遍首屏加载。 */
+  function resetList() {
+    searchMode = false;
+    searchKw = '';
+    searchTotal = 0;
+    listEl.innerHTML = '';
+    itemsById.clear();
+    minId = 0;
+    maxId = 0;
+    hasMore = true;
+    firstLoad = true;
+    paging = false;
+    touched = false;
+    setMore('');
+    emptyEl.textContent = '正在抓取首批数据…';
+    emptyEl.style.display = '';
+    pull(false);
+  }
+
+  // ---------- 列表 ----------
+
   async function pull(manual) {
+    // 搜索期间跳过轮询：不跳的话每 30 秒一次的增量会把搜索结果冲掉，
+    // 用户会看到「搜出来的东西自己消失了」。
+    if (searchMode) return;
     if (polling) return;
     polling = true;
     try {
@@ -231,7 +737,7 @@
       const url = isInitial
           ? '/api/news?limit=' + PAGE
           : '/api/news?since=' + maxId + '&limit=200';
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await api(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
 
@@ -240,6 +746,7 @@
       const items = data.items || [];
       if (isInitial) {
         listEl.innerHTML = '';
+        itemsById.clear();
         items.forEach(n => listEl.appendChild(render(n, false)));
         if (items.length) {
           firstLoad = false;
@@ -270,7 +777,10 @@
       }
 
       if (typeof data.maxId === 'number') maxId = data.maxId;
+      syncStates();
     } catch (e) {
+      // 401 已经由 api() 弹了登录层，这里再写「连接失败」只会误导人
+      if (e.message === 'UNAUTHORIZED') return;
       liveEl.className = 'dot err';
       lastEl.textContent = '连接失败';
       lastEl.title = e.message;
@@ -288,7 +798,10 @@
     loadingMore = true;
     setMore('loading');
     try {
-      const res = await fetch('/api/news?before=' + minId + '&limit=' + PAGE, { cache: 'no-store' });
+      const url = searchMode
+          ? '/api/news/search?q=' + encodeURIComponent(searchKw) + '&before=' + minId + '&limit=' + PAGE
+          : '/api/news?before=' + minId + '&limit=' + PAGE;
+      const res = await api(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       const items = data.items || [];
@@ -302,6 +815,9 @@
       }
       hasMore = data.hasMore === true && items.length > 0;
       setMore(hasMore ? 'idle' : 'end');
+      if (searchMode && !hasMore) {
+        moreEl.textContent = '「' + searchKw + '」共 ' + searchTotal + ' 条';
+      }
     } catch (e) {
       setMore('error', e.message);
     } finally {
@@ -339,13 +855,69 @@
     }, { rootMargin: '300px 0px' }).observe(sentinel);
   }
 
+  // 分析按钮用事件委托：列表会不断插入新行，逐行绑定监听会随滚动累积一堆失效闭包
+  listEl.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act="analyze"]');
+    if (!btn || btn.disabled) return;
+    const li = btn.closest('li');
+    if (li) doAnalyze(li);
+  });
+
   moreEl.addEventListener('click', () => {
     if (moreEl.className === 'err' || moreEl.className === 'manual') loadMore(true);
   });
-  document.getElementById('refresh').addEventListener('click', () => pull(true));
+  document.getElementById('refresh').addEventListener('click', () => {
+    // 搜索中按「立即刷新」如果什么都不做，看起来就像按钮坏了；重跑一次搜索更符合直觉
+    if (searchMode) runSearch(searchKw);
+    else pull(true);
+  });
 
-  pull(false);
-  setInterval(() => pull(false), 30000);
+  // 300ms 防抖：覆盖中文输入法的停顿，又不至于让人打两个字就等一次网络
+  qEl.addEventListener('input', e => {
+    qClearEl.hidden = !qEl.value;
+    // 拼音还没上屏时 input 也会触发，此时搜的是 "huigou" 这种拼音串，必须等上屏
+    if (e.isComposing) return;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(qEl.value), 300);
+  });
+
+  // 有些浏览器上屏后不再补发 input，所以 compositionend 也调一次（防抖会合并掉重复调度）
+  qEl.addEventListener('compositionend', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(qEl.value), 300);
+  });
+
+  qEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      clearTimeout(searchTimer);
+      runSearch(qEl.value);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      qClearEl.click();
+    }
+  });
+
+  qClearEl.addEventListener('click', () => {
+    qEl.value = '';
+    qClearEl.hidden = true;
+    clearTimeout(searchTimer);
+    qEl.focus();
+    runSearch('');
+  });
+
+  // 启动：存过凭证就直接进（凭证失效的话第一轮请求会 401，自动弹登录层）；
+  // 没存过就先给登录框。登录成功后会再调一次 start()，由 started 挡住重复轮询。
+  let started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    gateEl.hidden = true;
+    pull(false);
+    setInterval(() => pull(false), 30000);
+  }
+
+  if (authToken) start(); else showGate();
 })();
 </script>
 </body>

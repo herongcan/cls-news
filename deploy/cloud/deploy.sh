@@ -11,6 +11,8 @@
 # 可覆盖的变量：
 #   REMOTE_DIR  远端目录，默认 /opt/cls-news
 #   HOST_PORT   宿主机端口，默认 8080
+#               用非标端口而不是 80：国内云上未备案域名不能用 80/443，
+#               但 IP 直连非标端口不受影响，省掉整个备案流程。
 #   APP_PASSWORD 访问密码，默认 admin
 #   APP_USER     访问账号，默认 admin
 #
@@ -30,6 +32,13 @@ fi
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REMOTE_DIR="${REMOTE_DIR:-/opt/cls-news}"
 HOST_PORT="${HOST_PORT:-8080}"
+DOMAIN="${DOMAIN:-herongcan.icu}"
+# 80 端口时 URL 不显示端口，其余情况带上，避免出现 http://x:80 这种难看的东西
+if [[ "$HOST_PORT" == "80" ]]; then
+  PUBLIC_URL="http://$DOMAIN"
+else
+  PUBLIC_URL="http://$DOMAIN:$HOST_PORT"
+fi
 cd "$PROJECT_DIR"
 
 say() { printf '\033[36m[deploy]\033[0m %s\n' "$*"; }
@@ -191,13 +200,14 @@ echo
 echo "════════════════════════════════════════════"
 echo "  部署完成"
 echo "════════════════════════════════════════════"
-echo "  访问地址：http://$PUBLIC_IP:$HOST_PORT"
+echo "  访问地址：$PUBLIC_URL"
+echo "  备用地址：http://$PUBLIC_IP:$HOST_PORT（域名解析异常时可用）"
 echo "  账号密码：$APP_USER_NAME / $APP_PW"
 echo
 echo "  直接发给同事的说明："
 echo "  ─────────────────────────────────────"
 echo "  财联社快讯（内部工具）"
-echo "  地址：http://$PUBLIC_IP:$HOST_PORT"
+echo "  地址：$PUBLIC_URL"
 echo "  账号：$APP_USER_NAME"
 echo "  密码：$APP_PW"
 echo "  ─────────────────────────────────────"

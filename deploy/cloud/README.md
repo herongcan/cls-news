@@ -348,19 +348,33 @@ journalctl -u cls-news-backup.service -n 30 --no-pager
 
 ### 1. 现在没有 HTTPS
 
-IP 直连 + HTTP，Basic Auth 的密码是**明文过公网**的。同一个 WiFi 下会抓包的人能看到。
+**当前状态：域名 herongcan.icu 已完成备案，应用直接映射宿主机 80 端口，HTTP 直连。**
 
-我的判断是能接受，理由：密码是内部共享的、内容本身是公开新闻、过期就换。
-但你要清楚这是「够用」而不是「安全」。
+Basic Auth 的密码是**明文过公网**的（Base64 只是编码），同一 WiFi 下会抓包的人能还原出
+`admin:密码`。这一点在不上 HTTPS 的前提下无法消除，只能靠强密码 + 定期更换降低影响。
 
-想上 HTTPS 有两条路：
+想补 HTTPS 时不需要动应用和 compose，在宿主机装一层 Caddy 即可：
 
-- **买域名 + 备案**：域名十几块，但国内服务器备案要 1-2 周（需要域名实名、拍照核验）。
-  备案后用 80/443 + Caddy 自动证书，地址变成 `https://news.你的域名.com`，同事体验最好。
-- **自签证书**：10 分钟搞定，但每个同事浏览器都会跳「不安全」警告，
-  得手动点「继续访问」。十个人就是十次解释，不划算。
+```bash
+# apt 源在国内可达，不用拉 Docker 镜像（这台机器直连 Docker Hub 会超时）
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
+```
 
-十来个同事的内部工具，我的建议是**先不上**。等有人说「地址太长记不住」的时候，再去做域名那套。
+`/etc/caddy/Caddyfile`：
+
+```
+herongcan.icu {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+然后改两处：compose 的端口映射回到 `127.0.0.1:8080:8080`（关掉公网直连），
+`deploy.sh` 的 `HOST_PORT` 改回 8080。`systemctl reload caddy` 生效，证书自动申请续期。
 
 ### 2. DeepSeek 余额要盯
 

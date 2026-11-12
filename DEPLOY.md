@@ -188,9 +188,12 @@ curl -s -u "admin:你的密码" localhost:18080/api/status | grep -o '"analysisR
 > 第 ② 条最容易被跳过，也最要命。**如果它返回 200，说明你的 `.env` 没被读到**，
 > 此刻你的全文转贴正在公网上裸奔。检查 `docker compose config | grep APP_AUTH`。
 
-### 7. 配 HTTPS（仅形态 B）
+### 7. HTTPS（可选项，当前未启用）
 
-用 Caddy，它是目前配 HTTPS 最短的路径（自动申请、自动续期）：
+**现状**：域名 `herongcan.icu` 已备案，compose 直接映射宿主机 80，走 HTTP。
+想补 HTTPS 时再执行本节，应用和 compose 都不用改结构。
+
+用 Caddy，它是配 HTTPS 最短的路径（自动申请、自动续期）：
 
 ```bash
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
@@ -202,8 +205,8 @@ sudo apt update && sudo apt install -y caddy
 `/etc/caddy/Caddyfile`：
 
 ```
-news.你的域名.com {
-    reverse_proxy 127.0.0.1:18080
+herongcan.icu {
+    reverse_proxy 127.0.0.1:8080
 }
 ```
 
@@ -211,9 +214,13 @@ news.你的域名.com {
 sudo systemctl reload caddy
 ```
 
-Caddy 会自动签证书。同时把你的 compose 里端口映射保持 `127.0.0.1:18080:8080` —— **不要让 8080 直接暴露到公网**，否则别人可以绕过 Caddy 用 HTTP 访问，HTTPS 就白配了。
+同时要改两处，否则 Caddy 起不来或者 HTTPS 能被绕过：
 
-别忘了服务器安全组只开 22 / 80 / 443，**不要开 8080**。
+- compose 端口映射改成 `127.0.0.1:8080:8080`（80 让给 Caddy）
+- `deploy/cloud/deploy.sh` 里 `HOST_PORT` 改回 `8080`
+
+**不要让 8080 直接暴露到公网**，否则别人可以绕过 Caddy 用 HTTP 访问，HTTPS 就白配了。
+安全组只开 22 / 80 / 443。
 
 ---
 

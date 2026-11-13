@@ -15,12 +15,24 @@
  *  3. **输出要截断**。工具结果会原样进模型上下文，一条正文 2000 字、一次 30 条，
  *     就是 6 万字，直接挤掉真正有用的对话。
  *
+ * 为什么用 node:http 而不是 fetch：
+ * Codex 启动 MCP 子进程时用的 `node` 来自 **它自己继承的 PATH**，和你终端里的
+ * 不是同一个。实测这台机器上 `which node` 是 v22（WorkBuddy 自带），而 Codex
+ * 拿到的是 /usr/local/bin/node = **v16.20.2**，没有 fetch，于是启动即失败：
+ *   MCP server stderr: 需要 Node >= 18（当前 16.20.2），缺内置 fetch
+ * 所以这里刻意只用 Node 16 就有的 API —— 只要 `node` 能解析到 16 以上就能跑，
+ * 不依赖任何特定版本的绝对路径（那种路径带版本号，升级一次就失效）。
+ *
  * 环境变量：
  *  - CLS_BASE   应用地址，默认 http://127.0.0.1:8080
  *  - CLS_AUTH   Basic 凭证，格式 user:pass（推荐）
  *  - CLS_USER / CLS_PASS  分开给的写法，CLS_AUTH 优先
  *  - CLS_TIMEOUT_MS  单次请求超时，默认 10000
  */
+
+import http from 'node:http';
+import https from 'node:https';
+
 
 const BASE = (process.env.CLS_BASE || 'http://127.0.0.1:8080').replace(/\/+$/, '');
 const AUTH = process.env.CLS_AUTH
@@ -54,28 +66,67 @@ function assertAllowed(pathname) {
 }
 
 /**
- * GET 一次。GET 是幂等的，所以网络错和 5xx 重试一次是安全的；
+ * GET 一次。不用 fetch —— 见文件头「为什么用 node:http」。
+ * 响应体很小（几十 KB），所以一次性收集 Buffer 再解码，不做流式处理。
+ */
+function httpGet(url, headers) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      return reject(new Error(`地址不合法: ${url}`));
+    }
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request(u, { method: 'GET', headers, timeout: TIMEOUT_MS }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('error', reject);
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode || 0,
+          statusText: res.statusMessage || '',
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+    });
+    // timeout 只覆盖 socket 空闲；GET 的响应不会长时间无数据，够用
+    req.on('timeout', () => req.destroy(new Error(`超时 ${TIMEOUT_MS}ms`)));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/**
+ * GET 一次并解析 JSON。GET 是幂等的，所以网络错和 5xx 重试一次是安全的；
  * 401/404 是确定性结果，重试只是白等。
  */
 async function api(pathname, query) {
   assertAllowed(pathname);
   const qs = query && Object.keys(query).length ? '?' + new URLSearchParams(query).toString() : '';
   const url = BASE + pathname + qs;
-  const headers = { Accept: 'application/json' };
+  const headers = { Accept: 'application/json', 'Accept-Encoding': 'identity' };
   if (AUTH) headers.Authorization = 'Basic ' + Buffer.from(AUTH).toString('base64');
 
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
+      const res = await httpGet(url, headers);
       if (res.status === 401) throw new Error('401：凭证无效（检查 CLS_AUTH 是否为 user:pass）');
       if (res.status === 404) throw new Error('404：没有这条记录');
-      if (!res.ok) {
-        if (res.status >= 500 && attempt === 0) { lastErr = new Error(`HTTP ${res.status}`); continue; }
+      if (res.status < 200 || res.status >= 300) {
+        if (res.status >= 500 && attempt === 0) {
+          lastErr = new Error(`HTTP ${res.status}`);
+          continue;
+        }
         throw new Error(`HTTP ${res.status} ${res.statusText}`);
       }
       if (!AUTH) log('未配置 CLS_AUTH，直连无鉴权实例（仅限本地开发）');
-      return await res.json();
+      try {
+        return JSON.parse(res.body);
+      } catch {
+        throw new Error(`响应不是合法 JSON（前 120 字符）: ${res.body.slice(0, 120)}`);
+      }
     } catch (e) {
       // 401/404 已被转换成人话，不再重试
       if (/^(401|404)：/.test(e.message)) throw e;
@@ -306,11 +357,13 @@ async function handle(msg) {
 
 function main() {
   const major = Number(process.versions.node.split('.')[0]);
-  if (major < 18) {
-    log(`需要 Node >= 18（当前 ${process.versions.node}），缺内置 fetch`);
+  if (major < 16) {
+    log(`需要 Node >= 16（当前 ${process.versions.node}）`);
     process.exit(1);
   }
-  log(`启动，目标 ${BASE}${AUTH ? '，已带凭证' : '，无凭证'}`);
+  // 打出版本和可执行文件路径：Codex 用的 node 常和你终端里的不是同一个，
+  // 出问题时光看版本号就能判断是不是解析到了老版本
+  log(`启动 [node ${process.versions.node} @ ${process.execPath}]，目标 ${BASE}${AUTH ? '，已带凭证' : '，无凭证'}`);
 
   // stdin 关闭时不能立刻 exit：此刻可能还有工具调用在等 HTTP 回来，
   // 直接退会把结果丢掉（客户端表现为「工具无响应」，且日志里什么都没有）。

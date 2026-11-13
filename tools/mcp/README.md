@@ -61,6 +61,8 @@ env = { CLS_BASE = "http://8.136.19.57:8080", CLS_AUTH = "admin:admin" }
 | `CLS_USER` / `CLS_PASS` | 空 | 分开给的写法，`CLS_AUTH` 优先 |
 | `CLS_TIMEOUT_MS` | `10000` | 单次请求超时 |
 
+要求 **Node >= 16**。刻意不用 `fetch`（Node 18 才有），改用 `node:http` —— 原因见下面第 ③ 个坑。
+
 ## 三条设计约束（踩过才知道）
 
 **1. 只发 GET，路径必须在白名单里**
@@ -79,9 +81,9 @@ MCP over stdio 是「每行一个 JSON-RPC」。任何一次 `console.log` 都�
 
 工具结果是原样进模型上下文的。一条正文 600 字、一次 30 条就是 1.8 万字，会挤掉真正有用的对话。超过 8000 字符时**丢弃末尾的整条**并注明「已省略 N 条」，而不是把最后一条切成半句——切半句模型会以为是完整内容。
 
-## 两个容易卡住的点
+## 三个容易卡住的点
 
-**① Codex 里 MCP 工具调用要过审批策略**
+**① Codex 里的 MCP 工具调用要过审批策略**
 
 ```
 mcp: clsnews/latest_news started
@@ -101,6 +103,34 @@ codex exec --dangerously-bypass-approvals-and-sandbox ...
 
 Codex 结束会话会关掉管道。如果此时还有工具调用在等 HTTP，直接 `process.exit` 会把结果吞掉。现在按 pending 计数延后退出，另有 15 秒兜底，避免变成僵尸进程。
 
+**③ Codex 用的 `node` 不是你终端里的那个**（这条最容易误判成「服务端没部署好」）
+
+实际遇到过：`/mcp` 里显示 `clsnews: failed (0 tools)`，日志只有一行
+
+```
+MCP server stderr (node): [cls-mcp] 需要 Node >= 18（当前 16.20.2），缺内置 fetch
+```
+
+`which node` 明明是 v22，但 Codex 启动子进程用的是**它自己继承的 PATH**，在这台机器上解析到了 `/usr/local/bin/node` = v16.20.2。同一台机器两个 node，版本差 6 个大版本。
+
+所以：
+
+- 脚本改成只用 Node 16 就有的 API，**不再依赖特定 node 路径**；
+- 启动日志会打出版本和可执行文件全路径，以后再出问题一眼能看出来：
+
+```
+[cls-mcp] 启动 [node 16.20.2 @ /usr/local/bin/node]，目标 http://...
+```
+
+查 Codex 侧的失败原因，不要去猜，直接读它自己的日志（里面会转储子进程的 stderr）：
+
+```bash
+sqlite3 ~/.codex/logs_2.sqlite \
+  "select datetime(ts,'unixepoch','localtime'), substr(feedback_log_body,1,200)
+     from logs where feedback_log_body like '%clsnews%' order by ts desc limit 5;"
+```
+
+
 ## 自测
 
 不用装 Codex 也能验：
@@ -118,6 +148,7 @@ printf '%s\n%s\n' \
 
 | 现象 | 原因 |
 |---|---|
+| `/mcp` 里显示 `failed (0 tools)` | 子进程没起来或握手失败。**先看 Codex 日志里的 `MCP server stderr`**，九成是 node 版本或路径问题（见 ③），不是服务端 |
 | 工具列表为空 | 客户端没拿到 `tools/list` 响应；先跑上面的自测，看是不是 stdout 被日志污染 |
 | `401：凭证无效` | `CLS_AUTH` 格式不对，必须是 `user:pass`（冒号不能少） |
 | 所有调用都 `isError` | `CLS_BASE` 不通。注意这台服务器**境外拉 docker 镜像会超时**，但 API 本身正常 |

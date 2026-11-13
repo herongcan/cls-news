@@ -80,6 +80,12 @@ app:
     password: ${APP_PASSWORD:admin}
     permit-paths:
       - /healthz
+    # 是否信任 X-Forwarded-For / X-Real-IP。
+    # false（默认）：只用 TCP 对端地址。这两个头客户端能随便伪造，
+    #   现在没有反向代理，信它等于让人往访客表里写任意 IP。
+    # true：挂上 Caddy / Nginx / CDN 之后必须打开，
+    #   否则 remoteAddr 全是代理机地址，所有访客被算成一个人。
+    trust-forwarded-headers: ${APP_TRUST_XFF:false}
 
 logging:
   level:

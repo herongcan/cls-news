@@ -48,3 +48,29 @@ CREATE TABLE IF NOT EXISTS visit (
 );
 
 CREATE INDEX IF NOT EXISTS idx_visit_day ON visit (day);
+
+-- 访问明细：每次「登录成功后打开页面」一行。
+--
+-- 和 visit 表的区别：visit 是聚合口径（IP+日 去重），这张表是流水。
+-- 分开的理由是 visit 的主键就是去重规则，往里面加 vid 会改变它的语义，
+-- 已经存在的历史数据也会失去可比性。所以新增明细表，visit 保持原样。
+--
+-- vid 是前端 localStorage 里的随机串。有了它，同一个公司出口 IP 下的
+-- 十个人才能各自算一个访客（只按 IP 去重时他们是一个）。但 vid 可以被
+-- 清空（无痕模式）、也可以被伪造，所以它只是"辅助去重维度"，不是身份。
+CREATE TABLE IF NOT EXISTS access_log (
+    id      INTEGER PRIMARY KEY,
+    ts      INTEGER NOT NULL,                         -- epoch 秒
+    day     TEXT    NOT NULL,                         -- yyyy-MM-dd，与 visit 同口径
+    ip      TEXT    NOT NULL,
+    vid     TEXT,                                     -- 可空：无痕模式 / 老客户端
+    ua      TEXT,                                     -- 原始 UA，截断 512
+    device  TEXT,                                     -- wechat|wecom|qq|mobile|tablet|desktop|bot|unknown
+    os      TEXT,                                     -- ios|android|windows|macos|linux|bot|unknown
+    browser TEXT,                                     -- chrome|safari|edge|firefox|wechat|bot|unknown
+    path    TEXT,
+    referer TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_ts ON access_log (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_access_day ON access_log (day, vid);

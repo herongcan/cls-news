@@ -241,6 +241,54 @@ ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
   \"select id, substr(last_error,1,80) from news where analysis_status='failed' order by id desc limit 10\""
 ```
 
+### 看访问明细（谁、什么设备、什么时候）
+
+访客统计分两张表，口径不同，别混着看：
+
+| 表 | 口径 | 用途 |
+|---|---|---|
+| `visit` | IP + 自然日去重 | 页面顶栏「今日访客 / 累计」，含历史脏数据 |
+| `access_log` | 每次打开记一行（同 IP 60 秒内只记一次） | 设备、UA、时间分布，保留 90 天 |
+
+`access_log` **没有做成 HTTP 接口**，只能查库。这是有意的：那个接口对"任何持有凭证的人"开放，
+而现在是十几个人共用一个账号，把每个人的 IP 和设备摊给所有人看没有必要。
+
+```bash
+D=/var/lib/docker/volumes/cls-news_cls-data/_data/news.db
+
+# 最近 30 条：时间 / IP / 设备 / 浏览器
+ssh root@IP "sqlite3 -header -column $D \
+  \"select datetime(ts,'unixepoch','localtime') as 时间, ip, device, os, browser
+    from access_log order by ts desc limit 30\""
+
+# 设备分布（判断移动端占比）
+ssh root@IP "sqlite3 -header -column $D \
+  \"select device, count(*) n from access_log group by 1 order by n desc\""
+
+# 疑似爬虫：device='bot'。这个数现在应该接近 0
+ssh root@IP "sqlite3 -header -column $D \
+  \"select ip, count(*) n, max(ua) from access_log where device='bot' group by ip\""
+
+# 按 vid 去重的每日访客（比 visit 表准，同 IP 下的不同人分开算）
+ssh root@IP "sqlite3 -header -column $D \
+  \"select day, count(distinct coalesce(nullif(vid,''), ip)) uv
+    from access_log group by day order by day desc limit 14\""
+```
+
+两个数对不上是正常的：`visit.today` 按 IP 算，`access_log` 按 vid 算。
+公司 NAT 出口下十个同事，前者会显示 1，后者显示 10。
+
+**历史脏数据不会自己消失。** 改成"登录后才上报"之前的 `visit` 记录里，
+83% 是公网扫描器（只来过一次就再没出现）。它们会一直计入 `visitTotal`：
+
+```bash
+# 先只看，别直接删
+ssh root@IP "sqlite3 -header -column $D \
+  \"select ip, day, hits from visit where hits=1 and ip not in (select ip from access_log) limit 50\""
+```
+
+不提供自动清理，是因为这里面也混着"真来过一次就没再来的同事"，删不删由你判断。
+
 ### 更新代码
 
 改完代码直接重跑：

@@ -9,6 +9,7 @@ import com.herc.clsnews.job.IngestJob;
 import com.herc.clsnews.model.News;
 import com.herc.clsnews.model.NewsView;
 import com.herc.clsnews.source.NewsSource;
+import com.herc.clsnews.store.AccessLogStore;
 import com.herc.clsnews.store.NewsStore;
 import com.herc.clsnews.store.VisitStore;
 import org.springframework.http.ResponseEntity;
@@ -33,16 +34,19 @@ public class NewsController {
 
     private final NewsStore store;
     private final VisitStore visits;
+    private final AccessLogStore access;
     private final IngestJob ingest;
     private final NewsSource source;
     private final AnalysisService analysis;
     private final AppProps props;
     private final ObjectMapper mapper;
 
-    public NewsController(NewsStore store, VisitStore visits, IngestJob ingest, NewsSource source,
-                          AnalysisService analysis, AppProps props, ObjectMapper mapper) {
+    public NewsController(NewsStore store, VisitStore visits, AccessLogStore access, IngestJob ingest,
+                          NewsSource source, AnalysisService analysis, AppProps props,
+                          ObjectMapper mapper) {
         this.store = store;
         this.visits = visits;
+        this.access = access;
         this.ingest = ingest;
         this.source = source;
         this.analysis = analysis;
@@ -243,8 +247,12 @@ public class NewsController {
     }
 
     /**
-     * 访客明细。页面顶栏只用 today/total 两个数，这个接口给的是趋势，
-     * 用来回答「数字不涨了」到底是没人来、还是统计坏了。
+     * 访客统计。页面顶栏只用 today/total 两个数，其余给运维排查用。
+     *
+     * <p>这里只出聚合结果，<b>不含 IP、不含 UA</b>。原因是这个接口对"任何持有凭证的人"
+     * 开放，而当前密码是十几个人共用的一个账号 —— 把每个同事的 IP 和设备指纹摊给所有人看，
+     * 没有必要。需要看明细时直接查库（README 里有 SQL），那是偶尔一次的排查动作，
+     * 不值得为它多开一个暴露面。
      */
     @GetMapping("/visits")
     public Map<String, Object> visitStats(@RequestParam(defaultValue = "7") int days) {
@@ -253,6 +261,10 @@ public class NewsController {
         body.put("today", visits.countToday(today));
         body.put("total", visits.countTotal());
         body.put("hitsToday", visits.hitsToday(today));
+        // 更准的今日人数：优先按前端 vid 去重，同一出口 IP 下的多个人能分开算
+        body.put("todayByVid", access.uvOnDay(today));
+        body.put("devices", access.deviceStats(today));
+        body.put("hours", access.hourHistogram(today));
         body.put("days", visits.recentDays(days));
         return body;
     }

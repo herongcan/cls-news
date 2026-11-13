@@ -121,6 +121,88 @@ public class AccessLogStore {
         return out;
     }
 
+    /**
+     * 一行访问明细。字段顺序刻意跟建表语句一致，读代码时不用来回对。
+     *
+     * <p>用 record 而不是 {@code Map<String,Object>}：Map 的 key 拼错只有运行时才知道，
+     * 而这里少写一个字段编译就过不去。真正的输出格式化交给 Controller。
+     */
+    public record LogRow(long id, long ts, String ip, String vid, String device, String os,
+                         String browser, String path, String referer, String ua) {
+    }
+
+    /**
+     * 按条件倒序取明细，游标分页。
+     *
+     * <p>用 {@code id < before} 而不是 {@code ts < before}：同一秒内的多条记录
+     * 用时间游标会漏——分页边界正好落在同一秒里，就有几行永远翻不到。
+     * id 是自增主键，天然唯一且与写入顺序一致。
+     *
+     * @param day      自然日，必填（不做「全部日期」：没有 day 的查询要走全表扫）
+     * @param ipPrefix IP 前缀（如 {@code 114.247.}），null/空表示不过滤
+     * @param device   设备类型精确匹配，null/空表示不过滤
+     * @param before   游标，0 表示第一页
+     * @param limit    条数，调用方已夹紧
+     */
+    public List<LogRow> list(String day, String ipPrefix, String device, long before, int limit) {
+        List<Object> args = new java.util.ArrayList<>();
+        String where = whereClause(day, ipPrefix, device, before, args);
+        args.add(limit);
+        return jdbc.query("""
+                SELECT id, ts, ip, vid, device, os, browser, path, referer, ua
+                FROM access_log""" + where + " ORDER BY id DESC LIMIT ?",
+                (rs, i) -> new LogRow(
+                        rs.getLong("id"), rs.getLong("ts"), rs.getString("ip"), rs.getString("vid"),
+                        rs.getString("device"), rs.getString("os"), rs.getString("browser"),
+                        rs.getString("path"), rs.getString("referer"), rs.getString("ua")),
+                args.toArray());
+    }
+
+    /** 同条件下的总行数（不含游标条件），用来算「还有多少」和「共几行」。 */
+    public long countBy(String day, String ipPrefix, String device) {
+        List<Object> args = new java.util.ArrayList<>();
+        String where = whereClause(day, ipPrefix, device, 0, args);
+        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM access_log" + where, Long.class, args.toArray());
+        return n == null ? 0 : n;
+    }
+
+    /**
+     * 拼 WHERE 子句，条件值一律走绑定参数。
+     *
+     * <p>{@code ip} 用 LIKE 前缀匹配是刻意的：查「某个人」时手上往往只有
+     * {@code 114.247.} 这样的网段，没有完整 IP。代价是 LIKE 用不上索引，
+     * 但 day 条件已经把范围压到一天几十行，扫这点数据无所谓。
+     */
+    private static String whereClause(String day, String ipPrefix, String device,
+                                      long before, List<Object> args) {
+        StringBuilder sb = new StringBuilder(" WHERE day = ?");
+        args.add(day);
+        if (ipPrefix != null && !ipPrefix.isBlank()) {
+            sb.append(" AND ip LIKE ? ESCAPE '\\'");
+            args.add(escapeLike(ipPrefix.trim()) + "%");
+        }
+        if (device != null && !device.isBlank()) {
+            sb.append(" AND device = ?");
+            args.add(device.trim());
+        }
+        if (before > 0) {
+            sb.append(" AND id < ?");
+            args.add(before);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 转义 LIKE 的通配符。
+     *
+     * <p>不转义的话，查 {@code 10.0.0.1} 里的 {@code .} 虽然没问题，
+     * 但用户输入 {@code %} 就会变成「匹配全部」—— 一个查单人的条件静默返回全表。
+     * 反斜杠必须第一个转，否则后面插入的转义符会被二次转义。
+     */
+    private static String escapeLike(String s) {
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+    }
+
     /** 明细行数，给清理任务和排查用。 */
     public long count() {
         Long n = jdbc.queryForObject("SELECT COUNT(*) FROM access_log", Long.class);

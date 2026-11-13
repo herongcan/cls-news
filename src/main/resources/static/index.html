@@ -33,6 +33,11 @@
         flex-wrap:wrap;row-gap:4px}
   .meta>span{white-space:nowrap}
   .meta b{color:var(--text);font-weight:500}
+  /* 服务端没开鉴权时的显性标记。有它才不会把「登录框输什么都通过」
+     误当成真在鉴权 —— 那正是这个提示存在的全部理由。 */
+  #devbadge{color:var(--amber);border:.5px solid rgba(217,164,65,.45);
+            border-radius:4px;padding:1px 6px}
+  #devbadge[hidden]{display:none}
   button{background:transparent;border:.5px solid var(--line-2);color:var(--muted);
          font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:inherit}
   button:hover{border-color:#3b414c;color:var(--text)}
@@ -175,6 +180,8 @@
     <span>·</span>
     <span id="last">等待首次抓取</span>
     <button id="refresh">立即刷新</button>
+    <span id="devbadge" hidden
+          title="服务端 app.security.enabled=false（本地开发默认），接口没有鉴权，不带凭证也能直接拿到数据">本地模式 · 无鉴权</span>
   </div>
 </header>
 
@@ -217,6 +224,7 @@
   const vTotalEl = document.getElementById('vTotal');
   const qEl = document.getElementById('q');
   const qClearEl = document.getElementById('qclear');
+  const devBadgeEl = document.getElementById('devbadge');
 
   // ---------- 登录 ----------
   // 为什么不用浏览器原生的 Basic 弹窗：移动端（微信、QQ、UC 的内置内核，以及不少
@@ -940,7 +948,7 @@
   }
 
   // 启动：存过凭证就直接进（凭证失效的话第一轮请求会 401，自动弹登录层）；
-  // 没存过就先给登录框。登录成功后会再调一次 start()，由 started 挡住重复轮询。
+  // 没存过先问服务端「你这儿到底在不在鉴权」，再决定要不要登录框。
   let started = false;
   function start() {
     if (started) return;
@@ -953,7 +961,40 @@
     setInterval(() => pull(false), 30000);
   }
 
-  if (authToken) start(); else showGate();
+  /**
+   * 服务端没开鉴权（app.security.enabled=false）时的启动路径。
+   *
+   * <p>为什么要单独有这条路：本地开发默认就是这个状态，{@code BasicAuthFilter}
+   * 这个 Bean 根本不会被创建，所有 /api/** 直接 200。此时若照旧摆一个登录框，
+   * 它会「接受任何账号密码」—— 因为登录框的判据是「/api/status 返回成功了吗」，
+   * 而没人校验的接口总是成功。这层没有校验作用的界面比明说「没开鉴权」更危险：
+   * 会让人以为自己在输密码，实际数据对任何人都是敞开的。
+   *
+   * <p>所以这里收起登录框，并在顶栏挂一个显性标记，把状态说清楚。
+   */
+  function openMode() {
+    devBadgeEl.hidden = false;
+    start();
+  }
+
+  /**
+   * 不带凭证打一次 /api/status：200 说明没开鉴权，401 说明开了。
+   *
+   * <p>这是唯一能区分两种模式的信号。不再新增一个「鉴权状态」接口，是因为
+   * /api/status 本来就在 /api/** 下，白名单里不用多放任何东西。
+   */
+  async function boot() {
+    if (authToken) { start(); return; }
+    try {
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      if (res.ok) { openMode(); return; }
+    } catch (_) {
+      // 连不上服务器：仍然给登录框，用户至少能看见「连不上」以外的明确提示
+    }
+    showGate();
+  }
+
+  boot();
 })();
 </script>
 </body>

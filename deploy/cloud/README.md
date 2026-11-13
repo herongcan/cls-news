@@ -4,24 +4,24 @@
 
 ---
 
-## 一、买什么
+## 一、这台机器现在是什么（选型结论）
 
-**腾讯云轻量应用服务器，2核2G4M，99 元/年。**
+**阿里云 ECS，杭州，2 vCPU / 1740 MB / 40G 系统盘，Ubuntu 24.04 LTS，包年包月。**
+实测常驻内存 198 MiB（容器上限 512m）、CPU 0.09%，一台最低配的机器就跑满了。
 
-推荐它的唯一理由：**续费同价不涨价**。阿里云那个 38 元是秒杀款，抢不到就是 68，
-而且次年续费会往上跳；腾讯云这个 99 是首购续费一个价，省得明年再折腾一次搬家。
-
-下单时这几项别选错：
-
-| 选项 | 选什么 | 为什么 |
+| 维度 | 结论 | 理由 |
 |---|---|---|
-| 地域 | **北京 / 上海 / 广州**（离你近的） | 财联社 API 和 DeepSeek 都在国内，海外机房抓财联社容易被限流 |
-| 镜像 | **Ubuntu 24.04 LTS** | 下面命令都按这个写；22.04 也可以 |
-| 套餐 | 2核2G / 50G SSD / 4M | 这个服务 `mem_limit: 512m`，2G 富余很多 |
-| 时长 | 1 年 | 先别买三年，用得好再续 |
+| 地域 | 国内（杭州/北京/上海） | 财联社 API 和 DeepSeek 都在境内，海外机房抓财联社会被风控，表现为「时好时坏 + 日志全是超时」 |
+| 规格 | 2 核 2G 够用，1 核 1G 也能跑 | 容器限 512m；**1G 机器必须加 swap**，否则 OOM killer 只留一句 `Killed` |
+| 磁盘 | 40G 系统盘 | 库 600KB 级，容器日志有 `max-size: 10m / max-file: 3` 兜着 |
+| 计费 | **包年包月** | 不只是便宜：阿里云备案服务码要求包年包月、剩余时长 > 3 个月、内地节点、有公网带宽。**按量付费和试用实例不生成服务码** —— 域名现在用不了就是这个原因 |
+| 系统 | Ubuntu 24.04 LTS | 下面命令都按这个写；22.04 也可以 |
 
-不要买香港/新加坡节点——便宜一点，但财联社对海外 IP 有风控，会出现「采集时好时坏，
-日志里全是超时」，很容易误判成代码问题。
+**不要买香港/新加坡节点**：便宜一点，但财联社对海外 IP 有风控。
+
+> 当初这份文档推荐的是「腾讯云轻量 99 元/年」，最后买的是阿里云这台。两者的差别只在计费和备案：
+> 真要办备案，买之前先确认订单是**包年包月且剩余 > 3 个月**，否则后面还得换机器重来一遍。
+
 
 ---
 
@@ -29,22 +29,25 @@
 
 ### 1. 放行端口（最容易忘，忘了就是「服务明明起来了但打不开」）
 
-腾讯云控制台 → 轻量应用服务器 → 你的实例 → **防火墙** → 添加规则：
+阿里云控制台 → **ECS → 实例 → 安全组 → 入方向**（不是「轻量应用服务器」那个防火墙页面）添加规则：
 
 ```
-应用类型：自定义
-协议：TCP
-端口：8080
-来源：0.0.0.0/0
+协议类型：自定义 TCP
+端口范围：8080/8080
+授权对象：0.0.0.0/0
 备注：cls-news 访问端口
 ```
 
-22 端口默认已放行。80/443 用不上，可以先关掉。
+**22 也必须对 `0.0.0.0/0` 开放** —— GitHub Actions 的 runner 在境外，收紧到自己家 IP 会让自动发版直接失效
+（报错是「连不上」，看着像密钥问题）。
+
+80/443 现在用不上，可以先关着：没有证书，域名也还没备案。
 
 > 为什么用 8080 不用 80：国内服务器**用 IP 访问 80 端口不需要备案，但用域名必须备案**。
 > 注意备案拦截按 HTTP Host 头判定、**与端口无关**：域名没备案时，走 80 和走 8080
 > 都会返回运营商的拦截页。所以「换个非标端口就能用域名」是不成立的，
 > 只能备案，或者继续用 IP 直连。
+
 
 ### 2. 加 swap（内存越小越不能省）
 
@@ -64,10 +67,13 @@ free -h   # 确认 Swap 那行有值
 部署时不在服务器上跑 Maven 了（见下文），但 JVM + SQLite + 系统本身，
 留点 swap 当保险，成本是几 G 磁盘。
 
-> **1 GiB 内存的机器**（阿里云试用、轻量最低配）：swap 不是可选项。
-> 容器上限会被 `deploy.sh` 自动降到 448m（JVM 堆约 313MB），
-> 加上系统本身 ~200MB，正好卡在 1G 的天花板上，没有 swap 兜底很容易被 OOM 杀掉。
-> 如果要在这类机器上同时跑别的服务，建议先关掉不用的（尤其是宝塔面板）。
+> **当前这台（1740MB）没有配 swap**：`free -h` 的 Swap 那行是 `0B`。到目前为止没出过事
+> （容器常驻 198MiB / 上限 512m，宿主机还有 1GB 可用），但这是「暂时没踩到」而不是「不需要」。
+> 想补就照上面四条命令做一次，`fallocate` 2G 大约占 2G 磁盘（40G 盘现在用了 16%）。
+
+> **1 GiB 内存的机器**：swap 不是可选项。容器上限会被 `deploy.sh` 自动降到 **384m**
+> （`free -m` ≤ 1000 就降；≤ 1600 用 448m），加上系统本身 ~200MB，正好卡在 1G 的天花板上，
+> 没有 swap 兜底很容易被 OOM 杀掉。要在这类机器上同时跑别的服务，先关掉不用的（尤其是宝塔面板）。
 
 ### 3. 装 Docker
 
@@ -82,6 +88,9 @@ docker compose version     # 期望 Docker Compose version v2.x
 ---
 
 ## 三、部署（在你自己的 Mac 上执行）
+
+> **日常发版不用这一节**：现在推 `main` 就由 GitHub Actions 自动发版（见 [../../DEPLOY.md](../../DEPLOY.md) 第四节）。
+> 这里的命令用于**首次装机**、Actions 出故障时的应急、以及换机器重来一遍。
 
 ### 前置：配置免密登录
 
@@ -98,8 +107,14 @@ cd /Users/herc/WorkBuddy/2026-11-10-12-44-38/cls-news
 DEEPSEEK_API_KEY=sk-你的key ./deploy/cloud/deploy.sh root@你的公网IP
 ```
 
-脚本会依次做：本地打 jar → 同步代码 → 写远端 `.env`（账号密码固定 `admin` / `admin`）→ 构建镜像 → 起容器 →
-轮询 `/healthz` 直到就绪 → 把访问地址和密码打印出来。
+脚本会依次做：本地打 jar → 同步代码 → **重写**远端 `.env`（密码取 `APP_PASSWORD`，没给就用默认值 `admin`）
+→ 构建镜像 → 起容器 → 轮询 `/healthz` 直到就绪 → 把访问地址和密码打印出来。
+
+所以第一次跑就要把密码给对：
+
+```bash
+APP_PASSWORD='你的密码' DEEPSEEK_API_KEY=sk-你的key ./deploy/cloud/deploy.sh root@你的公网IP
+```
 
 首次大概 5-8 分钟（主要是拉 JRE 基础镜像，4M 带宽）。之后改代码重跑同一条命令，
 只增量构建，一两分钟。
@@ -152,13 +167,16 @@ TZ=Asia/Shanghai
 DB_PATH=/app/data/news.db
 APP_AUTH=true
 APP_USER=admin
-APP_PASSWORD=admin
+APP_PASSWORD=换成你自己的密码
 BIND_ADDR=0.0.0.0
 HOST_PORT=8080
 MEM_LIMIT=512m
 DOCKERFILE=deploy/cloud/Dockerfile.runtime
 DEEPSEEK_API_KEY=sk-xxxx
 ```
+
+> 手写这一份只适用于「不跑 deploy.sh 的纯手工部署」。**只要还跑 deploy.sh（或 Actions），它就会把
+> 这个文件整个重写**，你手改的密码会被覆盖 —— 改密码的正确姿势见后面「更新代码」那一节。
 
 两个变量最容易错：
 
@@ -186,21 +204,25 @@ done
 **6. 验收**（三条都过才算成）
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/healthz          # 200
-curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/api/news         # 401
-curl -s -u admin:admin http://IP:8080/api/status | python3 -m json.tool  # analysisReady
+curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/healthz           # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/api/news          # 401
+curl -s -u admin:密码 http://IP:8080/api/status | python3 -m json.tool     # analysisReady
 ```
 
 第 3 条重点看 `analysisReady`：`false` 说明 `.env` 里的 key 没生效，
 同事点「分析」只会拿到 503。
 
-**7. 回滚**（镜像还在，一条命令）
+**7. 回滚**（注意：这不是「回到上一个版本」）
+
+镜像 tag 固定 `cls-news:0.1.0`，每次发版直接覆盖，所以本地没有「上一版镜像」可用：
 
 ```bash
+# 只是重启当前版本，不换代码 —— 别把它当回滚
 ssh root@IP 'cd /opt/cls-news && docker compose down && docker compose up -d'
 ```
 
-数据在命名卷 `cls-news_cls-data` 里，`down` 不会丢；**`down -v` 会丢**。
+真正回滚：`git revert <坏提交>` → 推 `main` 重新发一次。数据在命名卷 `cls-news_cls-data` 里，
+`down` 不会丢；**`down -v` 会丢**。
 
 ### 部署完的自检
 
@@ -229,15 +251,15 @@ ssh root@IP 'cd /opt/cls-news && docker compose logs -f --tail=50'
 ssh root@IP 'cd /opt/cls-news && docker compose restart'
 
 # 看采集和分析进度（走 API，最省事）
-curl -s -u admin:admin http://IP:8080/api/status | python3 -m json.tool
+curl -s -u admin:密码 http://IP:8080/api/status | python3 -m json.tool
 
 # 查库：运行镜像是 JRE，里面没有 sqlite3，别用 docker compose exec 去查。
-# 宿主机装了 sqlite3 才能这么读（只读没问题，库是 WAL 模式）。
-ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
+# 宿主机装了 sqlite3 才能这么读；加 -readonly，别在线上库上抢写锁。
+ssh root@IP "sqlite3 -readonly /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
   \"select analysis_status, count(*) from news group by 1\""
 
 # 看有没有分析失败
-ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
+ssh root@IP "sqlite3 -readonly /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
   \"select id, substr(last_error,1,80) from news where analysis_status='failed' order by id desc limit 10\""
 ```
 
@@ -247,19 +269,23 @@ ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
 
 | 表 | 口径 | 用途 |
 |---|---|---|
-| `visit` | IP + 自然日去重 | 页面顶栏「今日访客 / 累计」，含历史脏数据 |
+| `visit` | IP + 自然日去重 | 页面顶栏「今日访客 / 累计」，含 11-13 之前的历史脏数据 |
 | `access_log` | 每次打开记一行（同 IP 60 秒内只记一次） | 设备、UA、时间分布，保留 90 天 |
 
-`access_log` **没有做成 HTTP 接口**，只能查库。这是有意的：那个接口对"任何持有凭证的人"开放，
-而现在是十几个人共用一个账号，把每个人的 IP 和设备摊给所有人看没有必要。
+**明细有接口了，优先用它**（`/api/visits/logs`，走 Basic 鉴权，形状按命令行设计）：
+
+```bash
+curl -s -u admin:密码 'http://IP:8080/api/visits/logs'                 # 今天最新 50 条
+curl -s -u admin:密码 'http://IP:8080/api/visits/logs?day=2026-11-12'   # 指定日期
+curl -s -u admin:密码 'http://IP:8080/api/visits/logs?ip=114.247.'      # IP 前缀
+curl -s -u admin:密码 'http://IP:8080/api/visits/logs?device=wechat'    # 只看微信
+curl -s -u admin:密码 'http://IP:8080/api/visits/logs?format=csv' -o visits.csv
+```
+
+需要聚合口径（设备分布、按日 UV、疑似爬虫）时再查库：
 
 ```bash
 D=/var/lib/docker/volumes/cls-news_cls-data/_data/news.db
-
-# 最近 30 条：时间 / IP / 设备 / 浏览器
-ssh root@IP "sqlite3 -header -column $D \
-  \"select datetime(ts,'unixepoch','localtime') as 时间, ip, device, os, browser
-    from access_log order by ts desc limit 30\""
 
 # 设备分布（判断移动端占比）
 ssh root@IP "sqlite3 -header -column $D \
@@ -278,6 +304,9 @@ ssh root@IP "sqlite3 -header -column $D \
 两个数对不上是正常的：`visit.today` 按 IP 算，`access_log` 按 vid 算。
 公司 NAT 出口下十个同事，前者会显示 1，后者显示 10。
 
+> `access_log` 是 2026-11-13 那次发版才建的，所以**它之前没有任何明细**，只有 `visit` 的聚合数字。
+> 看到「今天只有 1 条」先别当故障：那是当天唯一一次带凭证的 ping。
+
 **历史脏数据不会自己消失。** 改成"登录后才上报"之前的 `visit` 记录里，
 83% 是公网扫描器（只来过一次就再没出现）。它们会一直计入 `visitTotal`：
 
@@ -291,14 +320,24 @@ ssh root@IP "sqlite3 -header -column $D \
 
 ### 更新代码
 
-改完代码直接重跑：
+**常规路径是推 `main`**，GitHub Actions 编译 + rsync + `compose up -d --build`，实测 56 秒，不用开终端。
+
+手动兜底（Actions 挂了、或想临时推一版）：
 
 ```bash
 ./deploy/cloud/deploy.sh root@你的公网IP
 ```
 
-脚本会沿用远端已有的 key；访问密码是固定的 `admin/admin`，不会变，同事不会掉线。
-想换密码就在命令前加 `APP_PASSWORD=新密码`。
+脚本会沿用远端已有的 `DEEPSEEK_API_KEY`，不会让你重填。
+
+> **改密码的坑，先看这一段。** `deploy.sh` 每次都把远端 `.env` **整个重写**，
+> `APP_PASSWORD` 取的是环境变量 `${APP_PASSWORD:-admin}`。所以：
+>
+> - 只手改远端 `/opt/cls-news/.env` 里的密码 → **下一次发版会被覆盖回默认值**，同事突然又能用老密码进；
+> - 想永久改：`APP_PASSWORD=新密码 ./deploy/cloud/deploy.sh root@IP`，**并且**在仓库 Secrets 里加
+>   `APP_PASSWORD` 让流水线也传（现在 workflow 没接这个 secret，不接的话每次自动发版又会被重置）。
+>
+> 这条是当前设计的一个真实缺口，比「文档没写全」严重 —— 换密码前务必两边一起改。
 
 ### 备份
 
@@ -349,6 +388,11 @@ Environment=OSS_URL=oss://你的bucket/cls-news
 
 需要宿主机装了 `ossutil` 并配好凭据。没配也能正常跑，只是每次日志里会提醒一句。
 
+> **现状：没配。** 服务器上 `ossutil` 未安装，`cls-news-backup.service` 里也没有 `OSS_URL`，
+> 所以备份只有本地那一份、和库在同一块盘上 —— 磁盘坏或整机丢，数据和备份一起没。
+> 这是目前最值得补的一件事，补法是：装 ossutil → 配 `ossutil config` → 在 service 里加上面那行 →
+> `systemctl daemon-reload && systemctl restart cls-news-backup.timer` → 手动跑一次确认能看到「已上传异地」。
+
 #### 演练：不动生产地验证备份能不能用（至少每月一次）
 
 备份失败会静默，恢复失败会致命。演练就是让第二个问题在平时暴露出来。
@@ -358,7 +402,7 @@ Environment=OSS_URL=oss://你的bucket/cls-news
 /opt/cls-news/deploy/cloud/restore.sh --drill
 ```
 
-输出长这样，**重点看最后三行的 RPO**：
+输出长这样（**示例，行数和 RPO 每次都不一样**），**重点看最后三行的 RPO**：
 
 ```
 ──────────────────────────────────────────────
@@ -463,14 +507,21 @@ cd /opt/cls-news && docker compose logs --tail=80
 **不是应用页面**。拦截按 HTTP Host 头判定，跟端口无关，换端口绕不过去。
 所以同事现在只能用 `http://8.136.19.57:8080`。
 
-备案卡在「没有可备案的服务器」：阿里云要求 ECS 为包年包月、购买时长 >3 个月、
-中国内地节点、有公网带宽；按量付费和免费试用实例都不生成备案服务码。
-现有实例是 `ecs.e-c1m1.large`（杭州），需先在控制台确认为哪种计费方式。
+备案卡在「**没有可备案的服务器**」：阿里云生成备案服务码要求 ECS 为**包年包月**、剩余时长 **> 3 个月**、
+中国内地节点、有公网带宽；按量付费实例和免费试用实例都不生成服务码。
+现有实例是 `ecs.e-c1m1.large`（杭州），已确认不满足这一条 —— 这不是填错表，是资格问题，只能换计费方式或换机器。
 
-备案通过后：把 `deploy.sh` 的 `DOMAIN_READY` 设为 1 重新部署，访问地址会自动切成域名。
+三条出路，按代价排：
+
+1. 把实例转成包年包月（或续费到剩余 > 3 个月），再重新申请备案服务码；
+2. 新买一台符合条件的最低配包年包月实例，只用来拿备案服务码，服务仍跑在现在这台；
+3. 暂时不备案，继续用 `IP:8080`（同事已经在用，只是地址难记、且没有 HTTPS）。
+
+备案通过后：把 `deploy.sh` 的 `DOMAIN_READY` 设为 1 重新部署，访问地址会自动切成域名；
+再按下面的步骤套 Caddy 就能有 HTTPS。
 
 Basic Auth 的密码是**明文过公网**的（Base64 只是编码），同一 WiFi 下会抓包的人能还原出
-`admin:密码`。这一点在不上 HTTPS 的前提下无法消除，只能靠强密码 + 定期更换降低影响。
+`账号:密码`。这一点在不上 HTTPS 的前提下无法消除，只能靠强密码 + 定期更换降低影响。
 
 想补 HTTPS 时必须先过备案这一关，通过后在宿主机装一层 Caddy 即可（应用和 compose 不用动结构）：
 
@@ -492,15 +543,23 @@ herongcan.icu {
 }
 ```
 
-然后改两处：compose 的端口映射回到 `127.0.0.1:8080:8080`（关掉公网直连），
-`deploy.sh` 的 `HOST_PORT` 改回 8080。`systemctl reload caddy` 生效，证书自动申请续期。
+然后要改**三处**，否则 Caddy 起不来、或者 8080 还裸在公网上把 HTTPS 绕过去：
+
+1. `/opt/cls-news/.env` 里 `BIND_ADDR=127.0.0.1`（只监听本机，让 Caddy 独占公网）；
+2. `deploy/cloud/deploy.sh` 里 `echo "BIND_ADDR=0.0.0.0"` 改成 `127.0.0.1` —— **这一步不能只改 .env**，
+   脚本每次发版都会重写 `.env`，只改文件会在下一次部署后恢复成 0.0.0.0，等于又把 HTTP 端口敞开了；
+3. 安全组把 8080 从 `0.0.0.0/0` 收紧成不需要（只留 22/80/443）。
+
+`systemctl reload caddy` 生效，证书自动申请续期。
 
 ### 2. DeepSeek 余额要盯
 
-分析是自动跑的，余额用完不会报错到页面上，只是新消息停在 `pending`，
-看起来像「新闻不更新了」。每月看一眼余额，或者加个余额告警。
+当前是**手动模式**（`app.analysis.auto=false`），所以余额用完的表现不是「页面不更新」，而是
+**点「分析」直接报错**（`/api/news/{id}/analyze` 返回非 200，页面红字）；`pending` 会一直堆着不动，
+那是没人点，不是故障。
 
-成本参考：单条约 300 token，一天两三百条电报，deepseek-flash 大概**每月几块钱**。
+成本参考：单条约 400~800 token，日增 400 条电报，全分析一遍 deepseek-flash 大概**每月几块钱**；
+只分析感兴趣的那部分更省。`daily-cap: 300` 是防误触的保险，超限返回 429 而不是静默跳过。
 
 ---
 

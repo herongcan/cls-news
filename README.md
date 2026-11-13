@@ -89,10 +89,10 @@ docker compose up -d                  # 默认只绑 127.0.0.1，端口 HOST_POR
 | POST | `/api/news/{id}/analyze?force=false` | 手动触发单条分析 |
 | GET | `/api/analysis/state?ids=1,2,3` | 批量取这组 id 的分析状态（多人同时用时同步已渲染的行） |
 | POST | `/api/analysis/retry-failed` | 把 `failed` 全部打回 `pending` 重跑 |
-| GET | `/api/status` | 抓取状态、总数、分析进度与 token 用量、上次错误、`analysisReady` |
+| GET | `/api/status` | 抓取状态、总数、分析进度与 token 用量、上次错误、`analysisReady`、当前账号的 `role`（`rw` / `ro`） |
 | POST | `/api/visit/ping` | 前端每次进页面调一次，记访客（聚合 + 明细） |
 | GET | `/api/visits` | 访客聚合：今日/累计人数、按 vid 去重的今日人数、设备与小时分布、近 N 天 |
-| GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv` |
+| GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv`。**只读账号访问返回 403** |
 
 `/api/news` 的响应里带 `stats`，页面只发一个请求就能同时更新列表和状态栏。
 页面每 30 秒拉一次增量（`limit=200`，不分页），首屏和翻页各取 10 条。
@@ -153,6 +153,38 @@ APP_AUTH=true APP_USER=admin APP_PASSWORD='你的密码' java -jar target/cls-ne
 代价要说清楚：`index.html` 本身谁都能拿到（一个空壳，只有标题和样式），数据全在 `/api/**` 后面。
 另外 401 **只对非 `/api/` 请求**发 `WWW-Authenticate`，否则 Safari 会在页内登录层上面再弹一个原生框、输完还关不掉。
 
+### 两档角色：可写账号 vs 只读账号
+
+主账号是**可写**的 —— 能触发分析（烧 `daily-cap` 配额）、能读 `/api/visits/logs`（里面是每个人的 IP 和设备）。
+把这样一个账号发给朋友或面试官，等于把运维权限一起发出去。所以另外支持一批只读账号：
+
+```bash
+APP_AUTH=true APP_USER=admin APP_PASSWORD='主密码' \
+APP_READONLY='demo:给朋友的密码,guest:另一个' \
+java -jar target/cls-news-0.1.0.jar
+```
+
+| 能力 | 可写账号 | 只读账号 |
+|---|---|---|
+| `GET /api/**`（列表、搜索、单条、聚合访客数、状态） | ✅ | ✅ |
+| `POST /api/news/{id}/analyze`、`POST /api/analysis/retry-failed` | ✅ | ❌ 403 |
+| `GET /api/visits/logs`（访客明细，含 IP / UA） | ✅ | ❌ 403 |
+| `POST /api/visit/ping`（访客上报，无副作用） | ✅ | ✅ |
+
+三个实现上的选择：
+
+| 选择 | 原因 |
+|---|---|
+| 只读账号的判定在 **Filter 里**，不在每个 Controller 上 | 新增接口时不会因为忘了加注解而漏；默认就是「非 GET 一律挡」 |
+| 放行 `POST /api/visit/ping` | 它是纯统计写入。禁掉的话只读账号的访问不会进访客表，「今日访客」会偏低 |
+| 拦截 `/api/visits/logs` 而**不拦** `/api/visits` | 聚合数字（今天多少人、什么设备）给朋友看没有害处；明细里有具体 IP，是另一回事 |
+
+前端也会跟着收：只读账号登录后顶栏出现「只读」标记、「分析」按钮不渲染。
+但**这只是界面层**，真正的拦截在服务端 —— 隐藏按钮的理由是「别让人点了才发现不行」，不是安全边界。
+
+格式写错（比如少了冒号）或用户名与主账号重名时会**打 warn 并跳过**，不会静默生效：
+发出去的账号一直 401 却查不出原因，比启动失败更难排查。
+
 ### 登录框只在「服务端真的在鉴权」时才出现
 
 `app.security.enabled` 默认是 `false`（本地开发直接 `java -jar` 就是这个状态），此时
@@ -207,6 +239,7 @@ curl -u 1:1 localhost:8080/api/status    # 期望 401
 | `spring.task.scheduling.pool.size` | `4` | **别改回 1**：单线程时一个卡住的模型调用会把采集一起拖死 |
 | `app.security.enabled` | `false` | 环境变量 `APP_AUTH`。放公网必须 `true` |
 | `app.security.username` / `password` | `admin` / `admin` | 环境变量 `APP_USER` / `APP_PASSWORD`。**公网部署必须用 `APP_PASSWORD` 覆盖掉这个默认值**；密码设成空串 + 开启鉴权 = 启动失败 |
+| `app.security.read-only` | 空 | 环境变量 `APP_READONLY`，格式 `user:pass,user2:pass2`。只能 GET，写接口 403，看不到访客明细。发这个给朋友 / 面试官，别发主账号 |
 | `app.security.trust-forwarded-headers` | `false` | 环境变量 `APP_TRUST_XFF`。挂反向代理时才开 |
 | `spring.datasource.url` | `./data/news.db` | 环境变量 `DB_PATH`。容器里指向挂载卷 `/app/data/news.db` |
 
@@ -305,10 +338,12 @@ pending ──(原子认领)──> analyzing ──> done
 
 三件事按重要性排：
 
-1. **账号要收**。一个共用密码 + 全文，等于访问控制只剩一层，且泄露后无法定位是谁。至少改成一人一号
-   （`BasicAuthFilter` 现在只支持单账号，改成查表要动代码），或者接受现状但别再加人。
+1. **账号要收**。一个共用密码 + 全文，等于访问控制只剩一层，且泄露后无法定位是谁。
+   现在支持只读账号（见「两档角色」），但**只读 ≠ 一人一号**：还是查不出具体是谁在访问。
+   要真正做到能追责，得给每人一个账号并记到访问日志里。
 2. **`fulltext` 该改成 `false`**。改成 `false` 后接口只返回 60 字摘要 + 原文链接，页面点标题跳财联社原文 ——
    对「看个大概」的同事来说几乎没损失，但性质从「转载」退回「索引」。
+   **发只读账号给朋友之前，这一条更应该先做** —— 人数越多，「小范围」这个前提越站不住。
 3. 保留版权声明与原文链接（页面已经带了原文链接，声明没有）。
 
 采集侧是合规的，这部分没变：90 秒一轮、单轮 50 条，属于低频访问，UA / Referer 如实声明，没有绕过任何反爬。

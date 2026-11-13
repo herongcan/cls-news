@@ -70,7 +70,7 @@ app:
   # 为什么必须：这个工具按「只自己看」的口径存了全文，无鉴权放到公网
   # 等于做一个公开的财联社转贴站，版权风险是立刻兑现的，不是理论问题。
   security:
-    enabled: ${APP_AUTH:false}
+    enabled: ${APP_AUTH:true}
     username: ${APP_USER:admin}
     # 默认 admin/admin。这是十来个同事共用的内网工具，密码说好一个固定的就够了，
     # 每次部署随机生成反而会逼所有人把密码抄在便签上，安全性并不会更高。
@@ -78,6 +78,10 @@ app:
     # 注意 APP_PASSWORD 显式设成空字符串**不会**回落到这个默认值，而是直接启动失败——
     # 「以为开了鉴权、其实密码是空串」比明说没开更危险。
     password: ${APP_PASSWORD:admin}
+    # 只读账号，格式 user:pass,user:pass2（逗号分隔）。只能 GET，写接口一律 403，
+    # 且看不到 /api/visits/logs 的访客明细。给朋友 / 面试演示用这个，别发主账号——
+    # 主账号能触发分析（烧 daily-cap）也能看所有人的 IP。
+    read-only: ${APP_READONLY:}
     permit-paths:
       - /healthz
     # 是否信任 X-Forwarded-For / X-Real-IP。

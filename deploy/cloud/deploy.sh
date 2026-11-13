@@ -153,6 +153,20 @@ else
   [[ -n "$REMOTE_MEM_MB" ]] && say "远端内存 ${REMOTE_MEM_MB}MB，容器上限 512m"
 fi
 
+# 只读账号：显式给了就用，没给就**沿用远端已有的**。
+# 这一条和密码不同，必须沿用：密码丢了能重新发，发给朋友/面试官的只读账号
+# 一改就全失效，而它们通常是「加了就不管」的长期东西。
+# 注意不能只写 echo "APP_READONLY=$APP_READONLY"（未设时是空），
+# 那等于每次发版都把远端那份清掉。
+if [[ -z "${APP_READONLY:-}" ]]; then
+  APP_READONLY="$(ssh "$HOST" "sed -n 's/^APP_READONLY=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  # 不能写成 `[[ -n "$X" ]] && say ...`：X 为空时这条命令返回 1，
+  # 在 set -e 下会直接终止整个脚本。用 if 才安全。
+  if [[ -n "$APP_READONLY" ]]; then
+    say "沿用远端已有的只读账号配置"
+  fi
+fi
+
 say "写入远端 .env"
 {
   echo "# 由 deploy.sh 生成，不要提交"
@@ -161,6 +175,7 @@ say "写入远端 .env"
   echo "APP_AUTH=true"
   echo "APP_USER=$APP_USER_NAME"
   echo "APP_PASSWORD=$APP_PW"
+  echo "APP_READONLY=${APP_READONLY:-}"
   echo "BIND_ADDR=0.0.0.0"
   echo "HOST_PORT=$HOST_PORT"
   echo "MEM_LIMIT=$MEM_LIMIT"

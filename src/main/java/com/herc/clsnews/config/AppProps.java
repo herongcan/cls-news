@@ -50,6 +50,17 @@ public class AppProps {
         private String password = "";
         /** 健康检查不能要密码，否则 Docker/负载均衡永远判死 */
         private String[] permitPaths = {"/healthz"};
+        /**
+         * 是否信任 X-Forwarded-For / X-Real-IP。
+         *
+         * <p>默认 false，只用 {@code getRemoteAddr()}。因为这两个头是客户端随便写的：
+         * 现在没有反向代理，任何人不带密码就能用
+         * {@code curl -H "X-Forwarded-For: 8.8.8.8" ...} 往访客表里塞一个假 IP。
+         *
+         * <p>挂上 Caddy/Nginx 之后必须改成 true —— 那时 remoteAddr 会变成代理机地址，
+         * 所有访客被算成一个人，而且不会报错，只是数字永远不动。
+         */
+        private boolean trustForwardedHeaders = false;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -59,6 +70,8 @@ public class AppProps {
         public void setPassword(String password) { this.password = password; }
         public String[] getPermitPaths() { return permitPaths; }
         public void setPermitPaths(String[] permitPaths) { this.permitPaths = permitPaths; }
+        public boolean isTrustForwardedHeaders() { return trustForwardedHeaders; }
+        public void setTrustForwardedHeaders(boolean v) { this.trustForwardedHeaders = v; }
     }
 
     public static class Display {

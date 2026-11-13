@@ -78,8 +78,43 @@ docker compose up -d
 | POST | `/api/news/{id}/analyze` | 手动触发单条分析 |
 | POST | `/api/analysis/retry-failed` | 把 `failed` 全部打回 `pending` 重跑 |
 | GET | `/api/status` | 抓取状态、总数、分析进度与 token 用量、上次错误、`analysisReady` |
+| GET | `/api/visits` | 访客聚合：今日/累计人数、按 vid 去重的今日人数、设备与小时分布、近 N 天 |
+| GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv` |
 
 `/api/news` 的响应里带 `stats`，页面只发一个请求就能同时更新列表和状态栏。
+
+### 访客明细：直接用 curl 看
+
+明细接口是给排查用的，页面上没有入口，形状也按命令行设计：
+
+```bash
+A='admin:你的密码'; H='http://你的IP:8080'
+curl -u "$A" "$H/api/visits/logs"                  # 今天最新 50 条
+curl -u "$A" "$H/api/visits/logs?limit=200"        # 最多 500，超过会被夹紧
+curl -u "$A" "$H/api/visits/logs?before=1234"      # 翻下一页（取上一页返回的 nextBefore）
+curl -u "$A" "$H/api/visits/logs?day=2026-11-12"   # 指定自然日，格式必须是 yyyy-MM-dd
+curl -u "$A" "$H/api/visits/logs?ip=114.247."      # IP 前缀匹配，只记得网段时用
+curl -u "$A" "$H/api/visits/logs?device=wechat"    # wechat|wecom|qq|mobile|tablet|desktop|bot|unknown
+curl -u "$A" "$H/api/visits/logs?format=csv" -o visits.csv   # 导出，字段全带引号可放心用 Excel
+```
+
+返回里几个字段值得说明：
+
+| 字段 | 含义 |
+|---|---|
+| `requesterIp` | **这条 curl 自己**进来的 IP。和你刚上报的那条对得上，就说明 IP 记录生效了 |
+| `total` / `count` | 过滤条件下的总行数 / 本页行数（`hasMore` 由 `nextBefore` 非 0 判断） |
+| `time` / `ts` | 同一条记录的两种时间：给人看的本地时间和给脚本算的 epoch 秒 |
+| `vid` | 前端生成的随机 UUID。同 IP 下的两个人靠它区分，无痕模式下为空 |
+
+三条口径上的坑：
+
+- **明细不是每次打开页面一行。** 同一 IP 60 秒内只落一行（`AccessLogStore` 里的内存限流），
+  否则连按 F5 二十次就是二十行，"访问次数"退化成"刷新频率"。
+- **`vid` 为空时 UV 退回按 IP 算**（`COALESCE(NULLIF(vid,''), ip)`），所以 `total` 是行数不是人数，
+  人数看 `/api/visits` 的 `todayByVid`。
+- **这个接口会返回同事的 IP。** 密码是共用的，谁拿到密码谁就能看全部明细 ——
+  自用工具可接受，但别把它开给外部，也别在没上 HTTPS 的时候用（Basic 是明文 Base64）。
 
 ---
 

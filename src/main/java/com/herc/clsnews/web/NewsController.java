@@ -9,8 +9,10 @@ import com.herc.clsnews.job.IngestJob;
 import com.herc.clsnews.model.News;
 import com.herc.clsnews.model.NewsView;
 import com.herc.clsnews.source.NewsSource;
+import com.herc.clsnews.store.AccessLogStore;
 import com.herc.clsnews.store.NewsStore;
 import com.herc.clsnews.store.VisitStore;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -21,7 +23,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,18 +35,24 @@ import java.util.Map;
 @RequestMapping("/api")
 public class NewsController {
 
+    /** 明细接口的时间格式。cn 使用者看「2026-11-13 11:02:33」比看 epoch 直观。 */
+    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
     private final NewsStore store;
     private final VisitStore visits;
+    private final AccessLogStore access;
     private final IngestJob ingest;
     private final NewsSource source;
     private final AnalysisService analysis;
     private final AppProps props;
     private final ObjectMapper mapper;
 
-    public NewsController(NewsStore store, VisitStore visits, IngestJob ingest, NewsSource source,
-                          AnalysisService analysis, AppProps props, ObjectMapper mapper) {
+    public NewsController(NewsStore store, VisitStore visits, AccessLogStore access, IngestJob ingest,
+                          NewsSource source, AnalysisService analysis, AppProps props,
+                          ObjectMapper mapper) {
         this.store = store;
         this.visits = visits;
+        this.access = access;
         this.ingest = ingest;
         this.source = source;
         this.analysis = analysis;
@@ -243,8 +253,11 @@ public class NewsController {
     }
 
     /**
-     * 访客明细。页面顶栏只用 today/total 两个数，这个接口给的是趋势，
-     * 用来回答「数字不涨了」到底是没人来、还是统计坏了。
+     * 访客统计（聚合）。页面顶栏只用 today/total 两个数，其余给运维排查用。
+     *
+     * <p>这里只出聚合结果，<b>不含 IP、不含 UA</b> —— 明细在 {@link #visitLogs}，
+     * 单独一个路径，因为它的受众和用途完全不同：这个接口是页面首屏顺带取的，
+     * 那个是人为发起的排查动作。
      */
     @GetMapping("/visits")
     public Map<String, Object> visitStats(@RequestParam(defaultValue = "7") int days) {
@@ -253,9 +266,133 @@ public class NewsController {
         body.put("today", visits.countToday(today));
         body.put("total", visits.countTotal());
         body.put("hitsToday", visits.hitsToday(today));
+        // 更准的今日人数：优先按前端 vid 去重，同一出口 IP 下的多个人能分开算
+        body.put("todayByVid", access.uvOnDay(today));
+        body.put("devices", access.deviceStats(today));
+        body.put("hours", access.hourHistogram(today));
         body.put("days", visits.recentDays(days));
         return body;
     }
+
+    /**
+     * 访客明细，给 curl 排查用。
+     *
+     * <pre>
+     * 今天最新 50 条：  curl -u admin:xxx 'http://IP:8080/api/visits/logs'
+     * 指定日期：        curl -u ... 'http://IP:8080/api/visits/logs?day=2026-11-12'
+     * 查某个人：        curl -u ... 'http://IP:8080/api/visits/logs?ip=114.247.'
+     * 只看微信进来的：  curl -u ... 'http://IP:8080/api/visits/logs?device=wechat'
+     * 导出 CSV：        curl -u ... 'http://IP:8080/api/visits/logs?format=csv' -o visits.csv
+     * </pre>
+     *
+     * <p><b>为什么可以在这里返回 IP</b>：这个路径在 {@code /api/**} 后面，需要 Basic 凭证，
+     * 和 {@code /api/visits} 一样。区别是它把「谁能看到同事的 IP」这件事摆到了明面上 ——
+     * 当前密码是十几个人共用的，任何拿到密码的人都能看到全部明细。
+     * 对自用小工具来说这是可接受的取舍（换成每人一个账号成本远大于收益），
+     * 但要清楚：<b>这个接口不能开给外部，也不能在没有 HTTPS 的情况下用</b>。
+     *
+     * <p><b>为什么默认只查一天</b>：没有 {@code day} 的查询要走全表扫。明细表 90 天清理，
+     * 日增几百行，现在扫全表也就几万行不出事；但接口的形状决定了以后能怎么用，
+     * 默认值给成「今天」比「全部」更难变成慢查询。
+     */
+    @GetMapping("/visits/logs")
+    public ResponseEntity<?> visitLogs(@RequestParam(required = false) String day,
+                                       @RequestParam(defaultValue = "50") int limit,
+                                       @RequestParam(defaultValue = "0") long before,
+                                       @RequestParam(required = false) String ip,
+                                       @RequestParam(required = false) String device,
+                                       @RequestParam(defaultValue = "json") String format,
+                                       HttpServletRequest req) {
+        String target = day == null || day.isBlank()
+                ? LocalDate.now(ZoneId.systemDefault()).toString()
+                : day.trim();
+        try {
+            // 严格解析而不是「错了就当今天」：日期打错时静默返回今天的记录最误导人，
+            // 你会以为昨天的数据没了
+            LocalDate.parse(target);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "day 必须是 yyyy-MM-dd，例如 2026-11-13",
+                    "got", target));
+        }
+
+        int n = Math.max(1, Math.min(limit, 500));
+        List<AccessLogStore.LogRow> rows = access.list(target, ip, device, before, n);
+        long total = access.countBy(target, ip, device);
+        // 取满一页就认为可能还有：多一次往返换「不必精确算剩余」，和 /api/news 同一策略
+        long nextBefore = rows.size() >= n ? rows.get(rows.size() - 1).id() : 0;
+
+        if ("csv".equalsIgnoreCase(format)) {
+            return ResponseEntity.ok()
+                    // 不带 BOM：curl 管道给 awk/grep 时 BOM 会粘在第一列表头上
+                    .header("Content-Type", "text/csv; charset=UTF-8")
+                    .header("Content-Disposition", "attachment; filename=\"visits-" + target + ".csv\"")
+                    .body(toCsv(rows));
+        }
+
+        boolean trustForwarded = props.getSecurity().isTrustForwardedHeaders();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("day", target);
+        // 方便自查：这条 curl 自己是从哪个 IP 进来的，和你刚提交的那条记录对得上就说明按 IP 生效了
+        body.put("requesterIp", ClientIp.of(req, trustForwarded));
+        body.put("total", total);
+        body.put("count", rows.size());
+        body.put("hasMore", nextBefore > 0);
+        body.put("nextBefore", nextBefore);
+        body.put("items", rows.stream().map(NewsController::logView).toList());
+        return ResponseEntity.ok(body);
+    }
+
+    /** 明细行转成对外结构。time 是给人看的，ts 是给脚本算的，两个都给。 */
+    private static Map<String, Object> logView(AccessLogStore.LogRow r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", r.id());
+        m.put("time", LocalDateTime.ofInstant(Instant.ofEpochSecond(r.ts()), ZoneId.systemDefault())
+                .format(TIME_FMT));
+        m.put("ts", r.ts());
+        m.put("ip", r.ip());
+        m.put("vid", r.vid());
+        m.put("device", r.device());
+        m.put("os", r.os());
+        m.put("browser", r.browser());
+        m.put("path", r.path());
+        m.put("referer", r.referer());
+        m.put("ua", r.ua());
+        return m;
+    }
+
+    /**
+     * 拼 CSV。字段一律加引号并转义内部引号 —— UA 里带逗号和双引号是常态
+     * （{@code Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) ...}），
+     * 不转义的话列会整体错位，比没有 CSV 更糟。
+     */
+    private static String toCsv(List<AccessLogStore.LogRow> rows) {
+        StringBuilder sb = new StringBuilder("id,time,ip,vid,device,os,browser,path,referer,ua\n");
+        for (AccessLogStore.LogRow r : rows) {
+            String time = LocalDateTime.ofInstant(Instant.ofEpochSecond(r.ts()), ZoneId.systemDefault())
+                    .format(TIME_FMT);
+            csvField(sb, String.valueOf(r.id())).append(',');
+            csvField(sb, time).append(',');
+            csvField(sb, r.ip()).append(',');
+            csvField(sb, r.vid()).append(',');
+            csvField(sb, r.device()).append(',');
+            csvField(sb, r.os()).append(',');
+            csvField(sb, r.browser()).append(',');
+            csvField(sb, r.path()).append(',');
+            csvField(sb, r.referer()).append(',');
+            csvField(sb, r.ua()).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static StringBuilder csvField(StringBuilder sb, String v) {
+        sb.append('"');
+        if (v != null) {
+            sb.append(v.replace("\"", "\"\""));
+        }
+        return sb.append('"');
+    }
+
 
     private Map<String, Object> stats() {
         Map<String, Object> s = new LinkedHashMap<>();

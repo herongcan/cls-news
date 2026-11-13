@@ -241,6 +241,54 @@ ssh root@IP "sqlite3 /var/lib/docker/volumes/cls-news_cls-data/_data/news.db \
   \"select id, substr(last_error,1,80) from news where analysis_status='failed' order by id desc limit 10\""
 ```
 
+### 看访问明细（谁、什么设备、什么时候）
+
+访客统计分两张表，口径不同，别混着看：
+
+| 表 | 口径 | 用途 |
+|---|---|---|
+| `visit` | IP + 自然日去重 | 页面顶栏「今日访客 / 累计」，含历史脏数据 |
+| `access_log` | 每次打开记一行（同 IP 60 秒内只记一次） | 设备、UA、时间分布，保留 90 天 |
+
+`access_log` **没有做成 HTTP 接口**，只能查库。这是有意的：那个接口对"任何持有凭证的人"开放，
+而现在是十几个人共用一个账号，把每个人的 IP 和设备摊给所有人看没有必要。
+
+```bash
+D=/var/lib/docker/volumes/cls-news_cls-data/_data/news.db
+
+# 最近 30 条：时间 / IP / 设备 / 浏览器
+ssh root@IP "sqlite3 -header -column $D \
+  \"select datetime(ts,'unixepoch','localtime') as 时间, ip, device, os, browser
+    from access_log order by ts desc limit 30\""
+
+# 设备分布（判断移动端占比）
+ssh root@IP "sqlite3 -header -column $D \
+  \"select device, count(*) n from access_log group by 1 order by n desc\""
+
+# 疑似爬虫：device='bot'。这个数现在应该接近 0
+ssh root@IP "sqlite3 -header -column $D \
+  \"select ip, count(*) n, max(ua) from access_log where device='bot' group by ip\""
+
+# 按 vid 去重的每日访客（比 visit 表准，同 IP 下的不同人分开算）
+ssh root@IP "sqlite3 -header -column $D \
+  \"select day, count(distinct coalesce(nullif(vid,''), ip)) uv
+    from access_log group by day order by day desc limit 14\""
+```
+
+两个数对不上是正常的：`visit.today` 按 IP 算，`access_log` 按 vid 算。
+公司 NAT 出口下十个同事，前者会显示 1，后者显示 10。
+
+**历史脏数据不会自己消失。** 改成"登录后才上报"之前的 `visit` 记录里，
+83% 是公网扫描器（只来过一次就再没出现）。它们会一直计入 `visitTotal`：
+
+```bash
+# 先只看，别直接删
+ssh root@IP "sqlite3 -header -column $D \
+  \"select ip, day, hits from visit where hits=1 and ip not in (select ip from access_log) limit 50\""
+```
+
+不提供自动清理，是因为这里面也混着"真来过一次就没再来的同事"，删不删由你判断。
+
 ### 更新代码
 
 改完代码直接重跑：
@@ -301,28 +349,87 @@ Environment=OSS_URL=oss://你的bucket/cls-news
 
 需要宿主机装了 `ossutil` 并配好凭据。没配也能正常跑，只是每次日志里会提醒一句。
 
-#### 确认备份真的有用（这一步别省）
+#### 演练：不动生产地验证备份能不能用（至少每月一次）
+
+备份失败会静默，恢复失败会致命。演练就是让第二个问题在平时暴露出来。
 
 ```bash
-# 列出可用备份
-/opt/cls-news/deploy/cloud/restore.sh
-
-# 看最近一次的日志
-journalctl -u cls-news-backup.service -n 30 --no-pager
+# 自动挑最新一份，只读，不停服务，一个字节都不写
+/opt/cls-news/deploy/cloud/restore.sh --drill
 ```
 
-日志里应该看到 `校验通过：integrity ok，news N 行`。如果 N 是 0 而线上有数据，
-说明备到了错的库文件，别当它是好的。
+输出长这样，**重点看最后三行的 RPO**：
 
-#### 恢复
+```
+──────────────────────────────────────────────
+  备份体检：news-2026-11-12_0330.db.gz  (172K)
+──────────────────────────────────────────────
+  gzip            完整
+  integrity_check ok
+  表结构          news 表存在
+
+  行数            745
+  最早入库        2026-11-10 09:12:03
+  最后入库        2026-11-12 03:28:41
+  数据跨度        1 天 18 小时
+
+  标题为空        0 / 745
+  正文为空        5 / 745
+  分析状态        done 700  pending 40  failed 5
+
+  ── 与线上对比 ──
+  线上行数        768（备份少 23 行）
+  线上最后入库    2026-11-12 18:23:49
+  ▶ RPO          落后 14 小时 55 分
+──────────────────────────────────────────────
+```
+
+怎么读：
+
+| 看到 | 含义 | 该做什么 |
+|---|---|---|
+| `RPO 落后` 约等于备份间隔（如 15 小时） | 正常，说明备份抓到了最新的写入 | 无 |
+| `RPO` 突然变成好几天 | 备份从某天起就没成功过 | 查 `journalctl -u cls-news-backup` |
+| `行数` 是 0 而线上有数据 | 备到了错的文件 | **别把它当好备份**，查 `DB_FILE` 配置 |
+| `integrity_check` 不是 ok | 备份文件损坏 | 换一份，并检查磁盘 |
+| `标题为空` 大量出现 | 采集逻辑可能写入了空壳记录 | 查 `IngestJob` 日志 |
+| 最后一行是「没找到线上库」 | 在没装 docker 的机器上跑的 | 正常，只是跳过对比 |
+
+想验某一份特定的：`restore.sh /opt/cls-news-backup/news-2026-11-10_0330.db.gz --drill`
+
+**演练只验证数据层**（文件完整、表结构对、内容新鲜）。它不能替代真恢复演练——
+真正动手跑一次恢复（后面那节），你才知道整个流程要花多久、会在哪一步卡住。
+建议：先在一份**旧备份**上完整走一次恢复流程，确认自己会了，再等真出事。
+
+#### 恢复：真出事时
 
 ```bash
+# 不带参数先看有哪些备份
+/opt/cls-news/deploy/cloud/restore.sh
+
+# 挑一份恢复
 /opt/cls-news/deploy/cloud/restore.sh /opt/cls-news-backup/news-2026-11-12_0330.db.gz
 ```
 
-脚本会：校验 gzip → 校验 integrity → 打印「恢复后 N 行 / 当前线上 M 行」让你
-输入 `yes` 确认 → 停容器 → 把当前库另存为 `news-before-restore-*.db`（恢复错了
-还能退） → 删 `-wal`/`-shm` → 覆盖 → 起容器 → 轮询 `/healthz`。
+脚本会：校验 gzip → 校验 integrity → **打印完整体检报告（含 RPO）** → 让你输入
+`yes` 确认 → 停容器 → 把当前库另存为 `news-before-restore-*.db`（恢复错了还能退）
+→ 删 `-wal`/`-shm` → 覆盖 → 起容器 → 轮询 `/healthz` → 核对恢复后行数。
+
+确认那一步**必须手打 `yes`**，回车、`y`、`Y` 一律取消。恢复是不可逆操作，不该有
+「顺手一按」的路径。
+
+`--yes` 可以跳过确认，只给脚本化场景用（比如定时演练自动化），别手动敲。
+
+全程约 30 秒：停容器 2 秒 + 覆盖 1 秒 + 启动 9 秒 + 健康检查若干秒。
+
+**如果恢复后服务起不来**：
+
+```bash
+cd /opt/cls-news && docker compose logs --tail=80
+```
+
+退回到恢复前状态：把 `/var/lib/docker/volumes/cls-news_cls-data/_data/` 下的
+`news-before-restore-*.db` 按同样步骤放回去（**同样要先删 `-wal` 和 `-shm`**）。
 
 **为什么不删 `-wal` 会出事**，实测记录：
 

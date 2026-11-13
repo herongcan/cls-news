@@ -906,6 +906,39 @@
     runSearch('');
   });
 
+  /**
+   * 访客标识。用来区分「同一个出口 IP 下的不同人」——公司 NAT 后面十个人
+   * 只按 IP 去重的话是 1 个访客，有了它才是 10 个。
+   *
+   * 注意 crypto.randomUUID 是 secure context 才有的 API，而线上是
+   * http://8.136.19.57:8080，直接调是 undefined（TypeError）。
+   * 必须降级到 getRandomValues —— 那个在所有上下文都可用。
+   */
+  function visitId() {
+    try {
+      let v = localStorage.getItem('cls.vid');
+      if (v && /^[0-9a-f-]{8,64}$/.test(v)) return v;
+      v = (window.crypto && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : Array.from(crypto.getRandomValues(new Uint8Array(16)),
+                       b => b.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem('cls.vid', v);
+      return v;
+    } catch (_) {
+      // 无痕模式或禁掉 localStorage：不报错，服务端会按 IP 兜底去重
+      return '';
+    }
+  }
+
+  /** 上报一次访问。不阻塞首屏、失败不重试——这是统计，不是业务。 */
+  function pingVisit() {
+    api('/api/visit/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vid: visitId() })
+    }).catch(() => { /* 401 时 api() 已经弹了登录层，这里只吞掉 promise */ });
+  }
+
   // 启动：存过凭证就直接进（凭证失效的话第一轮请求会 401，自动弹登录层）；
   // 没存过就先给登录框。登录成功后会再调一次 start()，由 started 挡住重复轮询。
   let started = false;
@@ -913,6 +946,9 @@
     if (started) return;
     started = true;
     gateEl.hidden = true;
+    // 放在这里而不是登录成功的回调里：存过凭证的人根本不会走登录表单，
+    // 只统计登录动作会漏掉反复回访的那批人（也正是唯一值得统计的那批）。
+    pingVisit();
     pull(false);
     setInterval(() => pull(false), 30000);
   }

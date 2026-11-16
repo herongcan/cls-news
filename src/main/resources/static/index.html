@@ -79,6 +79,18 @@
   #theme{display:inline-flex;align-items:center;gap:5px}
   #theme .ti{font-size:12px;line-height:1}
   @media (max-width:640px){#theme .tl{display:none}}
+  /* 刷新钮只留图标。顶栏在 390px 上本来就要换行，四个汉字占的宽度
+     比它带来的信息量值钱得多；文字退到 title / aria-label 里，
+     需要提示时浏览器自己会浮出来。
+     手动刷新时箭头转起来 —— 纯图标钮点下去没有任何文字变化，
+     不转的话用户不知道到底有没有触发。 */
+  #refresh{display:inline-flex;align-items:center;justify-content:center;
+           width:25px;height:23px;padding:0}
+  #refresh svg{display:block}
+  #refresh.spin svg{animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* 前庭功能敏感的用户看持续旋转会难受，系统开了减少动效就只当普通按钮 */
+  @media (prefers-reduced-motion:reduce){#refresh.spin svg{animation:none}}
   main{max-width:920px;margin:0 auto;padding:0 20px 80px}
   ul{list-style:none;margin:0;padding:0}
   li{display:grid;grid-template-columns:56px 1fr;gap:14px;
@@ -249,7 +261,10 @@
     <span>·</span>
     <span id="last">等待首次抓取</span>
     <button id="theme" aria-label="切换主题" title="主题：自动（点击切换）"><span class="ti" id="themeIcon">◐</span><span class="tl" id="themeText">自动</span></button>
-    <button id="refresh">立即刷新</button>
+    <button id="refresh" aria-label="立即刷新" title="立即刷新"><svg viewBox="0 0 24 24"
+      fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+      stroke-linejoin="round" aria-hidden="true" focusable="false" width="13" height="13"
+      ><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></button>
     <span id="roBadge" hidden title="当前账号为只读：不能触发分析，也看不到访客明细">只读</span>
     <button id="logout" hidden>退出</button>
     <span id="devbadge" hidden
@@ -1066,10 +1081,15 @@
   moreEl.addEventListener('click', () => {
     if (moreEl.className === 'err' || moreEl.className === 'manual') loadMore(true);
   });
-  document.getElementById('refresh').addEventListener('click', () => {
+  const refreshEl = document.getElementById('refresh');
+  refreshEl.addEventListener('click', () => {
     // 搜索中按「立即刷新」如果什么都不做，看起来就像按钮坏了；重跑一次搜索更符合直觉
-    if (searchMode) runSearch(searchKw);
-    else pull(true);
+    const p = searchMode ? runSearch(searchKw) : pull(true);
+    if (!p) return;
+    // 图标钮没有文字能改成「刷新中…」，转箭头是唯一不占宽的反馈。
+    // 放在 finally 而不是成功分支：失败了也得停下来，不然一直空转更像坏了。
+    refreshEl.classList.add('spin');
+    p.finally(() => refreshEl.classList.remove('spin'));
   });
 
   // 300ms 防抖：覆盖中文输入法的停顿，又不至于让人打两个字就等一次网络

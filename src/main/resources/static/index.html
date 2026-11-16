@@ -33,6 +33,16 @@
         flex-wrap:wrap;row-gap:4px}
   .meta>span{white-space:nowrap}
   .meta b{color:var(--text);font-weight:500}
+  /* 服务端没开鉴权时的显性标记。有它才不会把「登录框输什么都通过」
+     误当成真在鉴权 —— 那正是这个提示存在的全部理由。 */
+  #devbadge{color:var(--amber);border:.5px solid rgba(217,164,65,.45);
+            border-radius:4px;padding:1px 6px}
+  #devbadge[hidden]{display:none}
+  /* 只读账号的标记与顶部「退出」。没有退出入口时，换账号只能手动清 localStorage，
+     这在「把链接发给朋友」的场景里是实打实的坑。 */
+  #roBadge{color:var(--dim);border:.5px solid var(--line-2);
+           border-radius:4px;padding:1px 6px}
+  #roBadge[hidden],#logout[hidden]{display:none}
   button{background:transparent;border:.5px solid var(--line-2);color:var(--muted);
          font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:inherit}
   button:hover{border-color:#3b414c;color:var(--text)}
@@ -175,6 +185,10 @@
     <span>·</span>
     <span id="last">等待首次抓取</span>
     <button id="refresh">立即刷新</button>
+    <span id="roBadge" hidden title="当前账号为只读：不能触发分析，也看不到访客明细">只读</span>
+    <button id="logout" hidden>退出</button>
+    <span id="devbadge" hidden
+          title="服务端 app.security.enabled=false（本地开发默认），接口没有鉴权，不带凭证也能直接拿到数据">本地模式 · 无鉴权</span>
   </div>
 </header>
 
@@ -217,6 +231,17 @@
   const vTotalEl = document.getElementById('vTotal');
   const qEl = document.getElementById('q');
   const qClearEl = document.getElementById('qclear');
+  const devBadgeEl = document.getElementById('devbadge');
+  const roBadgeEl = document.getElementById('roBadge');
+  const logoutEl = document.getElementById('logout');
+
+  /**
+   * 当前账号能不能做写操作（触发分析）。默认 true，拿到 /api/status 的 role 后可能变 false。
+   *
+   * <p>这只是**界面**层面的收敛，真正的拦截在服务端：只读账号发 POST 一律 403。
+   * 前端隐藏按钮的唯一理由是「别让人点了才发现不行」。
+   */
+  let canWrite = true;
 
   // ---------- 登录 ----------
   // 为什么不用浏览器原生的 Basic 弹窗：移动端（微信、QQ、UC 的内置内核，以及不少
@@ -299,6 +324,17 @@
       gateBtn.disabled = false;
       gateBtn.textContent = '进入';
     }
+  });
+
+  /**
+   * 退出：清掉本地凭证后重载。
+   *
+   * <p>不就地切回登录层，是因为页面上已经渲染的新闻、游标、itemsById 全都在内存里，
+   * 只盖一层登录框等于「数据还在 DOM 里，随时能手滑翻出来」。整页重载最干净。
+   */
+  logoutEl.addEventListener('click', () => {
+    forget();
+    location.reload();
   });
 
   let maxId = 0;            // 增量游标：全局最大 id，由服务端给
@@ -425,6 +461,8 @@
    * failed 是例外：那不是重算，是这次没成功，得给人一个再试的入口。
    */
   function actionHtml(n) {
+    // 只读账号一律不给按钮。留着按钮再让它 403，人会以为是坏了
+    if (!canWrite) return '';
     const st = n.analysisStatus || 'pending';
     if (st === 'analyzing') {
       return '<button class="act" disabled><span class="spin"></span>分析中</button>';
@@ -940,12 +978,13 @@
   }
 
   // 启动：存过凭证就直接进（凭证失效的话第一轮请求会 401，自动弹登录层）；
-  // 没存过就先给登录框。登录成功后会再调一次 start()，由 started 挡住重复轮询。
+  // 没存过先问服务端「你这儿到底在不在鉴权」，再决定要不要登录框。
   let started = false;
-  function start() {
+  async function start() {
     if (started) return;
     started = true;
     gateEl.hidden = true;
+    await applyRole();
     // 放在这里而不是登录成功的回调里：存过凭证的人根本不会走登录表单，
     // 只统计登录动作会漏掉反复回访的那批人（也正是唯一值得统计的那批）。
     pingVisit();
@@ -953,7 +992,61 @@
     setInterval(() => pull(false), 30000);
   }
 
-  if (authToken) start(); else showGate();
+  /**
+   * 取一次 /api/status 拿角色，决定要不要藏掉写操作。
+   *
+   * <p>拿不到就按可写处理：真不能写的时候服务端会 403，比整页空白强。
+   * 这个请求不影响首屏 —— pull() 本来就要打一次，这里多一次往返换来的是
+   * 「不会出现一个点了没用的按钮」。
+   */
+  async function applyRole() {
+    try {
+      const res = await api('/api/status');
+      if (!res.ok) return;
+      const st = await res.json();
+      canWrite = st.role !== 'ro';
+    } catch (_) {
+      return;
+    }
+    // 退出按钮只在真开了鉴权、有凭证的时候才有意义；open 模式下点了也没事发生
+    if (authToken) logoutEl.hidden = false;
+    if (!canWrite) roBadgeEl.hidden = false;
+  }
+
+  /**
+   * 服务端没开鉴权（app.security.enabled=false）时的启动路径。
+   *
+   * <p>为什么要单独有这条路：本地开发默认就是这个状态，{@code BasicAuthFilter}
+   * 这个 Bean 根本不会被创建，所有 /api/** 直接 200。此时若照旧摆一个登录框，
+   * 它会「接受任何账号密码」—— 因为登录框的判据是「/api/status 返回成功了吗」，
+   * 而没人校验的接口总是成功。这层没有校验作用的界面比明说「没开鉴权」更危险：
+   * 会让人以为自己在输密码，实际数据对任何人都是敞开的。
+   *
+   * <p>所以这里收起登录框，并在顶栏挂一个显性标记，把状态说清楚。
+   */
+  function openMode() {
+    devBadgeEl.hidden = false;
+    start();
+  }
+
+  /**
+   * 不带凭证打一次 /api/status：200 说明没开鉴权，401 说明开了。
+   *
+   * <p>这是唯一能区分两种模式的信号。不再新增一个「鉴权状态」接口，是因为
+   * /api/status 本来就在 /api/** 下，白名单里不用多放任何东西。
+   */
+  async function boot() {
+    if (authToken) { start(); return; }
+    try {
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      if (res.ok) { openMode(); return; }
+    } catch (_) {
+      // 连不上服务器：仍然给登录框，用户至少能看见「连不上」以外的明确提示
+    }
+    showGate();
+  }
+
+  boot();
 })();
 </script>
 </body>

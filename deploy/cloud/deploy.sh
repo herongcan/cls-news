@@ -153,6 +153,32 @@ else
   [[ -n "$REMOTE_MEM_MB" ]] && say "远端内存 ${REMOTE_MEM_MB}MB，容器上限 512m"
 fi
 
+# 只读账号：显式给了就用，没给就**沿用远端已有的**。
+# 这一条和密码不同，必须沿用：密码丢了能重新发，发给朋友/面试官的只读账号
+# 一改就全失效，而它们通常是「加了就不管」的长期东西。
+# 注意不能只写 echo "APP_READONLY=$APP_READONLY"（未设时是空），
+# 那等于每次发版都把远端那份清掉。
+if [[ -z "${APP_READONLY:-}" ]]; then
+  APP_READONLY="$(ssh "$HOST" "sed -n 's/^APP_READONLY=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  # 不能写成 `[[ -n "$X" ]] && say ...`：X 为空时这条命令返回 1，
+  # 在 set -e 下会直接终止整个脚本。用 if 才安全。
+  if [[ -n "$APP_READONLY" ]]; then
+    say "沿用远端已有的只读账号配置"
+  fi
+fi
+
+# 反向代理信任：**必须沿用远端值**。
+# 2026-11-16 起前台是 Cloudflare Tunnel，cloudflared 在 X-Forwarded-For 里写真实
+# 客户端 IP，靠 APP_TRUST_XFF=true 才取得到。这一行如果被重写成 false，访客会全部
+# 记成 127.0.0.1 —— 而且不报错，只是数字从此冻住，通常要过好几天才有人发现。
+# 所以和 APP_READONLY 一样：显式给了就用，没给就回读远端。
+if [[ -z "${APP_TRUST_XFF:-}" ]]; then
+  APP_TRUST_XFF="$(ssh "$HOST" "sed -n 's/^APP_TRUST_XFF=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  if [[ -n "$APP_TRUST_XFF" ]]; then
+    say "沿用远端已有的 APP_TRUST_XFF=$APP_TRUST_XFF"
+  fi
+fi
+
 say "写入远端 .env"
 {
   echo "# 由 deploy.sh 生成，不要提交"
@@ -161,6 +187,10 @@ say "写入远端 .env"
   echo "APP_AUTH=true"
   echo "APP_USER=$APP_USER_NAME"
   echo "APP_PASSWORD=$APP_PW"
+  echo "APP_READONLY=${APP_READONLY:-}"
+  # 默认 false：没有反向代理时信任 XFF 等于允许伪造 IP（见 ClientIp 的注释）。
+  # 挂了 Tunnel / Caddy / Nginx 就必须是 true，否则访客 IP 全是代理机地址。
+  echo "APP_TRUST_XFF=${APP_TRUST_XFF:-false}"
   echo "BIND_ADDR=0.0.0.0"
   echo "HOST_PORT=$HOST_PORT"
   echo "MEM_LIMIT=$MEM_LIMIT"

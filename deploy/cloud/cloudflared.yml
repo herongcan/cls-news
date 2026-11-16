@@ -1,0 +1,30 @@
+# Cloudflare Tunnel 配置（放在服务器 /etc/cloudflared/config.yml）
+#
+# 为什么用 tunnel 而不是 Caddy：域名没有 ICP 备案，直连 80/443 会被运营商按
+# Host 头拦掉。tunnel 是**出站**长连接 —— 本机主动连 Cloudflare 边缘，公网没有
+# 任何入站端口，请求从边缘顺着这条连接推进来，不经过备案拦截那一层。
+#
+# 证书由 Cloudflare 边缘签发（免费版 Universal SSL），源站不需要证书。
+#
+# 改完要 systemctl restart cloudflared，不是 reload。
+
+tunnel: 2cc19420-d362-4e61-b12c-d668d9e44859
+credentials-file: /etc/cloudflared/2cc19420-d362-4e61-b12c-d668d9e44859.json
+
+# 默认是 quic。这条链路（杭州 → 洛杉矶，跨境）实测 QUIC 极易超时：
+# 10 分钟里 8 次 "failed to dial to edge with quic"，TTFB 飙到 12 秒。
+# http2 走 TCP，有拥塞控制兜底，抗丢包明显更好，代价是头部延迟略高。
+protocol: http2
+
+ingress:
+  # 只能走 localhost：应用容器把 8080 发布在宿主机上（BIND_ADDR=0.0.0.0），
+  # 127.0.0.1:8080 能通，而公网 8080 应该在安全组里关掉。
+  - hostname: news.herongcan.icu
+    service: http://127.0.0.1:8080
+    originRequest:
+      # 采集任务偶尔会卡住数据库几秒；默认 30s 会让人以为页面挂了
+      connectTimeout: 10s
+      # 不要在这里覆写 Host：应用不依赖 Host 头，但 Cloudflare 的
+      # 备案/回源口径都按 Host 走，改了只会让排查时对不上
+  # 没匹配到的域名一律 404，避免变成开放代理
+  - service: http_status:404

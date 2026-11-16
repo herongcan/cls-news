@@ -1,333 +1,356 @@
 # 部署上线
 
-这份文档只回答一件事：**怎么把它从一个「你本机能跑的 jar」变成「一个 24 小时在线、只有你能看」的服务。**
+这份文档分三块：**线上现在到底是什么样**、**换机器怎么从零重建**、**日常运维/备份/排障**。
+
+> 分工：[deploy/cloud/README.md](deploy/cloud/README.md) 是逐步命令版（含备份恢复的全部细节），
+> 本文件偏「为什么这么定、边界在哪、出事看哪里」。两份有重叠，但不要一份写完另一份就不管 ——
+> 重叠部分以本文件为准（它是按线上实测状态写的）。
 
 ---
 
-## 零、已经实测过的部分（不是你照着猜的）
+## 零、线上现状（一页速览）
 
-下面这些不是「应该可以」，是在本机 Docker 上真跑过一遍的结果：
+2026-11-13 在服务器上实测的数字，不是估计：
 
-| 验证项 | 结果 |
+| 项 | 现状 |
 |---|---|
-| 镜像构建 | ✅ 成功，`cls-news:0.1.0`，519MB，首次约 2 分钟（之后有缓存约 16 秒） |
-| 容器启动 | ✅ `Up (healthy)`，健康检查 `FailingStreak: 0` |
-| 时区 | ✅ 容器内 `date` 返回 `CST +0800`，日志时间是本地时间 |
-| 运行用户 | ✅ `uid=999(app)`，非 root |
-| 数据落盘 | ✅ `/app/data/news.db`，属主 `app:app` |
-| 抓取 | ✅ 首轮入库 50 条，两轮后 54 条，`lastError` 为空 |
-| 重启保留数据 | ✅ 重启前 52 条 → 重启后 54 条（原数据在 + 新抓 2 条） |
-| 鉴权拦截 | ✅ 无凭据 401、错密码 401、正确凭据 200、`/healthz` 放行 |
-| 空密码保护 | ✅ `APP_AUTH=true` 且密码为空时，**进程直接退出**并说明原因 |
-| 白名单绕过 | ✅ `/healthz/../api/status` 等 6 种穿越变体全部 401/400，无一泄露 |
-| key 缺失降级 | ✅ 采集正常、`analysisReady=false`、`pending` 不被刷成 `failed` |
+| 机器 | 阿里云 ECS，杭州，2 vCPU / 1740 MB / 40G 系统盘（已用 16%），Ubuntu 24.04.5 LTS |
+| 入口 | `https://news.herongcan.icu`（Cloudflare Tunnel，证书由 CF 边缘签发）；`http://8.136.19.57:8080` 仍可直连，作为隧道故障时的退路 |
+| 容器 | `cls-news:0.1.0`（运行镜像 568MB，基础 JRE 432MB），`mem_limit 512m`，`restart: unless-stopped` |
+| 实测占用 | 常驻 198 MiB / 512 MiB，CPU 0.09%，`load average 0.04` |
+| 数据 | 命名卷 `cls-news_cls-data` → `/app/data/news.db`（WAL 模式） |
+| 备份 | `/opt/cls-news-backup`，systemd timer 每天 03:30（`Persistent=true`），保留 7 天，一份约 230KB |
+| 明细清理 | 应用内 `AccessLogCleaner` 每天 04:40 删 90 天前的 `access_log` |
+| 发版 | 推 `main` → GitHub Actions 编译 → rsync → 远端 `docker compose up -d --build` |
+| 账号 | 单账号 Basic，十来个人共用（**弱项，见第六节**） |
+| 域名 | `news.herongcan.icu` CNAME → `<tunnel-id>.cfargotunnel.com`。**未做 ICP 备案**，靠 Tunnel 出站长连接绕开拦截，公网零入站端口 |
 
-**没测到的**：真实云服务器（apt 源速度、安全组、备案）、Caddy 自动签证书、长时间运行的内存曲线。
+服务端依赖只有四样：Docker 29.1.3（compose 2.40.3）、宿主机 `sqlite3` 3.45.1（备份脚本用）、`cloudflared` 2026.11.0（systemd 常驻）、22 + 8080 两个开放端口。
+没有 Nginx/Caddy、没有外部数据库、没有 Redis —— 一个容器、一个卷、一条出站隧道，就这些。
 
 ---
 
-## 一、先回答「现在能不能上线」
+## 一、机器怎么选（当前这台就是按这个标准买的）
 
-分三类看，不要说「能跑就能上线」。
-
-### 已经具备的
-
-| 能力 | 现状 | 为什么这算具备 |
+| 维度 | 结论 | 理由 |
 |---|---|---|
-| 单进程交付 | 一个 jar，36MB | 没有外部中间件、没有前端构建，部署面最小 |
-| 数据持久化 | SQLite 单文件 | 重启不丢；`DB_PATH` 可指向挂载卷 |
-| 抓取容错 | 失败只记 `lastError`，不退出 | 财联社接口变了不会导致服务挂掉 |
-| 分析容错 | 独立 worker + 每日上限 | 模型挂了不影响采集，账单有天花板 |
-| 崩溃恢复 | 启动时把 `analyzing` 打回 `pending` | 进程被杀不会让某条消息永久卡死 |
-| 健康检查 | `/healthz`（免鉴权，真读一次库） | 容器和负载均衡能判断死活 |
-| 访问控制 | HTTP Basic，可开关 | **公网必须开**，见下 |
-| 容器化 | Dockerfile + compose | 依赖、时区、JVM 参数全部固化 |
+| 地域 | 国内（杭州） | 财联社 API 在境内，海外机房实测会被风控，表现为「时好时坏 + 日志全是超时」 |
+| 规格 | 2 核 2G 足够，1 核 1G 也能跑 | 容器限 512m，实测常驻 198MiB；**但 1G 机器必须加 swap**，否则 OOM killer 只留一句 `Killed` |
+| 磁盘 | 40G 系统盘 | 库现在 600KB 级，日志有 `max-size: 10m / max-file: 3` 兜着，磁盘不是瓶颈 |
+| 计费 | 包年包月 | 不只是便宜：**按量付费/试用实例不生成备案服务码**，这就是域名现在还用不了的原因 |
+| 系统 | Ubuntu 24.04 LTS | 命令都按这个写；22.04 也行 |
 
-### 上线前你必须拍板的
+**不要买香港/新加坡节点**：便宜一点，但财联社对海外 IP 有风控。
 
-| 决定 | 选项 | 建议 |
-|---|---|---|
-| 谁能访问 | 只有你 / 十来个同事 / 公开 | **只有你**。公开就等于做一个财联社转贴站，风险性质变了 |
-| 有没有域名 | 有 / 只用 IP | 没域名就只用 IP + 强密码，或 SSH 隧道（更安全） |
-| 服务器位置 | 国内 / 海外 | 抓国内站用国内机器。**没有域名就不用备案** |
+### 为什么不直接用云数据库/托管服务
 
-### 仍然不构成生产级的（我明确说，不粉饰）
-
-| 缺口 | 影响 | 什么时候必须补 |
-|---|---|---|
-| 只能跑一个实例 | SQLite 写锁 + 无分布式协调，两个容器会抢同一条记录重复调模型 | 需要扛并发或高可用时，换 Postgres + 改认领逻辑 |
-| 没有监控告警 | 挂了只有你自己发现 | 真依赖它做决策时，加个定时 curl + 告警 |
-| 备份要手动 | 磁盘坏 = 数据全丢 | 数据有历史价值时，配 cron 备份（见第五节） |
-| Basic 认证无登录态 | 每次请求都带密码，无登出 | 要多人使用时换 OIDC 或至少加 HTTPS |
-| 无 WAF / 限流 | 被刷只能靠机器扛 | 公开访问时 |
-
-**结论：按「只有你一个人看」的口径，它已经够上线了。按「给公司同事用」的口径，还差监控、备份、限流。**
+- **不上 RDS**：现在库是 600KB、日增 400 行、单实例读写，换 RDS 只增加网络往返和月度账单。
+  但要注意：**上 RDS 之前必须先补测试**，因为现有 SQL 里用了 `UPDATE ... RETURNING`
+  （MySQL 不支持）、`INSERT ... ON CONFLICT`（PG 语法不同），不是改连接串就能切的。
+- **不上 K8s**：SQLite 的 POSIX 文件锁只在单机有效，NFS/多节点共享被 SQLite 官方明确禁止（会损坏库）。
+  要做高可用必须先把存储换掉，那是另一个项目。
 
 ---
 
-## 二、两种部署形态，先选一种
+## 二、从零重建（换机器时照这一节做）
 
-### 形态 A：服务器 + SSH 隧道（推荐，最省事也最安全）
+前提：你手上有仓库写权限、能拿到 DeepSeek key、能改 DNS。
 
-服务只监听 `127.0.0.1`，公网完全摸不到。你在任何机器上：
+### 1. 系统准备
 
 ```bash
-ssh -L 18080:127.0.0.1:18080 root@你的服务器IP
-# 然后浏览器打开 http://localhost:18080
+# 装 Docker（国内用阿里云镜像源，官方源在大陆机器上会卡在 TLS 握手）
+curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun
+systemctl enable --now docker
+
+# 备份脚本要用宿主机的 sqlite3：运行镜像是 JRE，里面没有这个命令
+apt-get update && apt-get install -y sqlite3
+
+docker --version && docker compose version && sqlite3 --version
 ```
 
-优点：**不需要域名、不需要备案、不需要 HTTPS、不怕扫描器**，Basic 密码即使明文也没有中间人。
-缺点：每台设备要开隧道；手机上不方便。
+2G 及以下内存的机器加 swap 当保险（不是可选项）：
 
-### 形态 B：服务器 + 域名 + HTTPS
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
 
-直接浏览器访问 `https://news.你的域名.com`，Basic Auth 密码由 TLS 保护。
+安全组只开两个端口：**22**（GitHub runner 要能 ssh 进来）和 **8080**（同事访问）。
+80/443 不用开，以后也不用 —— HTTPS 走 Cloudflare Tunnel，公网零入站端口。
 
-优点：手机、任何设备都能开。
-缺点：域名要备案（国内机器）、要配证书、暴露在公网要面对扫描。
+### 2. 放代码
 
-> **必须配 HTTPS 的理由**：Basic 认证的凭据是 Base64，不是加密。纯 HTTP 下等于明文密码在公网上传输。
+```bash
+ssh root@服务器IP 'mkdir -p /opt/cls-news'
+rsync -az --exclude '.git' --exclude '.idea' --exclude '.env' \
+  --exclude 'data' --exclude 'logs' --exclude '*.log' \
+  ./ root@服务器IP:/opt/cls-news/
+```
+
+`.env` 必须排除在 rsync 之外 —— 里面是密码和 key，`--delete` 会把它删掉。
+
+### 3. 写 `.env`（线上就是这 10 行）
+
+```ini
+TZ=Asia/Shanghai
+DB_PATH=/app/data/news.db
+APP_AUTH=true
+APP_USER=admin
+APP_PASSWORD=换成你自己的密码
+BIND_ADDR=0.0.0.0
+HOST_PORT=8080
+MEM_LIMIT=512m
+DOCKERFILE=deploy/cloud/Dockerfile.runtime
+DEEPSEEK_API_KEY=sk-xxxx
+```
+
+`chmod 600 .env`。两个最容易错的：
+
+- **`DOCKERFILE` 不写**就回落到根目录的多阶段 Dockerfile，远端要现拉 500MB 的 maven 镜像，
+  4M 带宽十几分钟，还容易被 OOM —— 而 `cls-news:0.1.0` 只需要一个 36MB 的 jar + JRE。
+- **`MEM_LIMIT`** 按 `free -m` 的总内存定：≤1000MB 用 `384m`（1G 机器）、≤1600MB 用 `448m`、否则 `512m`。
+  写大了会被 OOM killer 反复杀，症状是「容器过一会儿就重启」。
+
+> 不要留空 `APP_PASSWORD`。开了鉴权但密码为空时进程会**直接退出**，这是故意的：
+> 「以为开了鉴权」比「明说没开」危险得多。
+
+### 4. 构建并启动
+
+```bash
+ssh root@服务器IP 'cd /opt/cls-news && docker compose up -d --build'
+ssh root@服务器IP 'cd /opt/cls-news && docker compose ps'      # 等 STATUS 变 healthy，约 20-40 秒
+```
+
+首次启动会立刻抓一轮，几秒后库里就有 50 条。
+
+### 5. 验收（四条，缺一不可）
+
+```bash
+curl -s localhost:8080/healthz                      # ① 必须 {"status":"UP",...}
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/api/status   # ② 必须 401
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:密码 localhost:8080/api/status  # ③ 必须 200
+curl -s -u admin:密码 localhost:8080/api/status | grep -o '"analysisReady":[a-z]*'  # ④ 看 key 生效没
+```
+
+第 ② 条最容易被跳过也最要命：**返回 200 说明 `.env` 没被读到**，全文库正在公网上裸奔。
+排查用 `docker compose config | grep APP_AUTH`。
+
+`analysisReady=false` 说明 key 没配好。这时采集和页面都正常，只是点「分析」会拿 503 ——
+补上 key 后 `docker compose up -d` 即可，不需要 `retry-failed`。
+
+### 6. 装备份
+
+```bash
+# 手动跑一次，确认能通
+/opt/cls-news/deploy/cloud/backup.sh
+
+# 装成 systemd timer（每天 03:30，Persistent=true 补跑）
+cp /opt/cls-news/deploy/cloud/cls-news-backup.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now cls-news-backup.timer
+systemctl list-timers cls-news-backup.timer
+```
+
+细节见第五节和 [deploy/cloud/README.md](deploy/cloud/README.md)。
+
+### 7. 接上自动发版
+
+仓库 Settings → Secrets and variables → Actions：
+
+| 名称 | 值 |
+|---|---|
+| `SSH_HOST` | 纯 IP，**不带 `root@`**（`ssh-keyscan` 不认） |
+| `SSH_KEY` | 部署私钥全文，含 `-----BEGIN/END-----` 两行，**不要 passphrase**（CI 里没有终端） |
+| `DEEPSEEK_API_KEY` | 可选；不配就沿用远端 `.env` 里已有的 |
+
+私钥用 `ssh-keygen -t ed25519 -N '' -f ~/.ssh/cls-news-deploy` 生成，公钥 `ssh-copy-id` 到服务器。
+之后每次推 `main` 就自动发版，不用再开终端。
 
 ---
 
-## 三、部署步骤（以一台 Ubuntu 云服务器为例）
-
-### 1. 装 Docker
-
-```bash
-# 官方脚本；国内网络慢的话用阿里云的镜像脚本
-curl -fsSL https://get.docker.com | sh
-sudo systemctl enable --now docker
-docker --version
-```
-
-### 2. 把项目传上去
-
-```bash
-# 在本地项目目录
-rsync -avz --exclude target --exclude data --exclude .env --exclude .idea \
-  ./cls-news/ root@服务器IP:/opt/cls-news/
-```
-
-或者推到 git 仓库再在服务器上 clone。**注意 `.env` 不要进仓库**（`.gitignore` 已排除）。
-
-### 3. 配置密码与 key
-
-```bash
-cd /opt/cls-news
-cp .env.example .env
-chmod 600 .env
-vim .env        # 填 APP_PASSWORD 和 DEEPSEEK_API_KEY
-```
-
-生成一个像样的密码：
-
-```bash
-openssl rand -base64 18
-```
-
-填完确认一下 **`APP_PASSWORD` 那行不是空的**（`cat .env` 看一眼）：
-
-```bash
-grep -c '^APP_PASSWORD=.\+' .env    # 必须输出 1
-```
-
-> 不要用 `APP_PASSWORD=` 空着启动。**开启了鉴权但密码为空时，程序会拒绝启动** —— 这是故意的，
-> 因为「以为开了鉴权」比「明说没开」危险得多。
-
-`DEEPSEEK_API_KEY` 可以先空着：服务照常启动、新闻照常抓，只是 `analysisReady=false`、分析暂停。
-补上 key 后 `docker compose up -d` 重启就会自动开始分析，不需要 `retry-failed`。
-
-### 4. 构建镜像
-
-国内机器必须带镜像源参数，否则拉 `maven` / `eclipse-temurin` 时会 TLS 握手超时（我实测过）：
-
-```bash
-docker build \
-  --build-arg MAVEN_IMAGE=docker.m.daocloud.io/library/maven:3.9-eclipse-temurin-17 \
-  --build-arg JRE_IMAGE=docker.m.daocloud.io/library/eclipse-temurin:17-jre \
-  -t cls-news:0.1.0 .
-```
-
-海外机器或 CI 直接 `docker build -t cls-news:0.1.0 .` 即可。
-
-> 如果服务器上 buildx 报 `operation not permitted`（部分受限环境），加 `DOCKER_BUILDKIT=0` 用传统构建器。
->
-> 更省事的做法：在本地 build 好，`docker save cls-news:0.1.0 | gzip > cls-news.tar.gz`，传上去 `docker load`。
-> 服务器上就不用装 Maven、不用拉 300MB 构建镜像。
-
-### 5. 启动
-
-```bash
-docker compose up -d
-docker compose ps          # 等 STATUS 变成 healthy
-docker compose logs -f     # 看启动日志
-```
-
-第一次启动会立刻抓一轮，约 5 秒后库里就有 50 条。
-
-### 6. 验证（四条，缺一不可）
-
-```bash
-# ① 健康检查：必须返回 {"status":"UP",...}
-curl -s localhost:18080/healthz
-
-# ② 鉴权生效：必须返回 401
-curl -s -o /dev/null -w "%{http_code}\n" localhost:18080/api/status
-
-# ③ 凭据正确：必须返回 200
-curl -s -o /dev/null -w "%{http_code}\n" -u "admin:你的密码" localhost:18080/api/status
-
-# ④ 数据在长：隔几分钟看 total 有没有变化
-curl -s -u "admin:你的密码" localhost:18080/api/status
-
-# ⑤ 分析状态：false 说明 key 没配好（采集仍正常）
-curl -s -u "admin:你的密码" localhost:18080/api/status | grep -o '"analysisReady":[a-z]*'
-```
-
-> 第 ② 条最容易被跳过，也最要命。**如果它返回 200，说明你的 `.env` 没被读到**，
-> 此刻你的全文转贴正在公网上裸奔。检查 `docker compose config | grep APP_AUTH`。
-
-### 7. HTTPS（可选项，当前未启用）
-
-**现状**：域名 `herongcan.icu` 解析已生效，但 ICP 备案未完成，浏览器访问会看到运营商的
-「域名暂时无法访问」拦截页（按 Host 头判定，跟端口无关）。同事暂用 `http://8.136.19.57:8080`。
-本节步骤在备案通过后再执行。
-
-用 Caddy，它是配 HTTPS 最短的路径（自动申请、自动续期）：
-
-```bash
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update && sudo apt install -y caddy
-```
-
-`/etc/caddy/Caddyfile`：
-
-```
-herongcan.icu {
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-```bash
-sudo systemctl reload caddy
-```
-
-同时要改两处，否则 Caddy 起不来或者 HTTPS 能被绕过：
-
-- compose 端口映射改成 `127.0.0.1:8080:8080`（80 让给 Caddy）
-- `deploy/cloud/deploy.sh` 里 `HOST_PORT` 改回 `8080`
-
-**不要让 8080 直接暴露到公网**，否则别人可以绕过 Caddy 用 HTTP 访问，HTTPS 就白配了。
-安全组只开 22 / 80 / 443。
-
----
-
-## 四、日常运维
+## 三、日常运维
 
 ```bash
 cd /opt/cls-news
 
-docker compose logs -f --tail=100      # 实时日志
-docker compose restart                  # 改了 .env 之后
-docker compose down                     # 停止（数据在卷里，不会丢）
-docker compose up -d --build            # 更新代码后重建
-
-docker stats cls-news                   # 内存/CPU 实际占用
+docker compose logs -f --tail=100      # 实时日志（分析失败、采集超时都在这）
+docker compose restart                 # 改了 .env 之后
+docker compose ps                      # 看 healthy 和重启次数
+docker stats --no-stream cls-news      # 内存/CPU 实际占用
 ```
 
-### 改配置的三种情况
+### 改东西的正确姿势
 
 | 改什么 | 怎么做 | 要不要重建镜像 |
 |---|---|---|
 | 密码、API key、抓取间隔 | 改 `.env` → `docker compose up -d` | 不要 |
-| 提示词 `prompts/analyze-news.md` | 改文件 → 重建镜像 → `up -d` | 要（打在 jar 里） |
-| Java 代码 | 同上 | 要 |
+| Java 代码 / 提示词 | 本地提交 → 推 `main` → Actions 自动发版 | 要（打在 jar 里） |
+| 应急：直接改线上代码 | `./deploy/cloud/deploy.sh root@IP` 手动推一次 | 要 |
 
 > 提示词改一次就要重建镜像，是这个设计的已知代价。好处是配置和代码一起版本化，
-> 不会出现「线上提示词和仓库里不一致」。如果以后频繁调提示词，把 `prompts/` 挂成卷即可。
+> 不会出现「线上提示词和仓库里不一致」。真变频繁了就把 `prompts/` 挂成卷。
+
+**改密码没有热更新**：`BasicAuthFilter` 继承 `OncePerRequestFilter`，它的 `doFilter` 是 `final`，
+CGLIB 生成不了刷新代理，所以接 Nacos 之类的配置中心也刷新不到它。换密码 = 改 `.env` + 重启容器。
+
+### 三种「定时任务」别混
+
+| 时间 | 谁跑的 | 干什么 |
+|---|---|---|
+| 每 90 秒 | 应用内 `IngestJob` | 抓一轮财联社（`app.interval-ms`） |
+| 每天 03:30 | systemd `cls-news-backup.timer` | `sqlite3 .backup` → 校验 → gzip → 清理 7 天前 |
+| 每天 04:40 | 应用内 `AccessLogCleaner` | 删 90 天前的访问明细（错开备份） |
+
+### 查数据
+
+运行镜像是 JRE，**里面没有 sqlite3**，别用 `docker compose exec` 去查。两条路：
+
+```bash
+# ① 接口（首选，页面和脚本都用它）
+curl -s -u admin:密码 'localhost:8080/api/status' | python3 -m json.tool
+curl -s -u admin:密码 'localhost:8080/api/visits/logs?limit=50'
+curl -s -u admin:密码 'localhost:8080/api/visits/logs?day=2026-11-12&device=wechat'
+curl -s -u admin:密码 'localhost:8080/api/visits/logs?format=csv' -o visits.csv
+
+# ② 宿主机上只读查库（一定要 -readonly，别抢写锁）
+DB=/var/lib/docker/volumes/cls-news_cls-data/_data/news.db
+sqlite3 -readonly "$DB" "select analysis_status, count(*) from news group by 1"
+sqlite3 -readonly "$DB" "select day, count(distinct ip) uv, sum(hits) pv from visit group by day order by day desc"
+```
+
+> 8080 是直接映射到公网的，所以**在服务器本机 curl `localhost:8080` 时，`remoteAddr` 是 Docker 网桥网关
+> `172.18.0.1`**（走了 docker-proxy），不是真实客户端 IP。外部访问走 iptables DNAT，源 IP 是保留的。
+> 所以 `/api/visits/logs` 里 `requesterIp=172.18.0.1` 只在你自己本机自测时出现，不是 bug。
 
 ---
 
-## 五、备份（唯一必须做的运维动作）
+## 四、发版与回滚
 
-数据只有一个 SQLite 文件，丢了就是全丢。**不要用 `cp` 直接拷 `.db`**：WAL 模式下还有 `-wal` 文件，
-只拷主库会得到一份缺最近写入的备份。
+**常规路径：推 `main`。** 流水线：编译（runner 上）→ 校验 fat jar → `ssh-keyscan` 写 `known_hosts`
+→ `deploy.sh`（连通性 → 复用远端 key → rsync → 写 `.env` → compose → healthz 轮询）→ 失败自动抓远端日志。
 
-正确做法是用 SQLite 自己的备份命令：
+一次完整发版实测 **56 秒**，其中容器重启窗口 20-40 秒，期间页面打不开（SQLite 单实例，不能滚动更新）。
 
-```bash
-# 手动备份
-docker exec cls-news sh -c 'command -v sqlite3 >/dev/null || exit 1'
-docker run --rm -v cls-news_cls-data:/data -v $(pwd)/backup:/backup alpine \
-  sh -c 'apk add -q sqlite && sqlite3 /data/news.db ".backup /backup/news-$(date +%F).db"'
+**`paths-ignore` 会挡掉三类改动**，所以「推了 main 但线上没变」先看这个：
+
+```yaml
+paths-ignore:
+  - '**.md'            # 只改文档不发版
+  - 'deploy/laptop/**'
+  - 'tools/eval/**'
 ```
 
-或者更简单可靠的**停服拷贝**（几秒钟的停机，对自用工具完全可接受）：
-
-```bash
-docker compose stop
-docker run --rm -v cls-news_cls-data:/data -v $(pwd)/backup:/backup alpine \
-  cp /data/news.db /backup/news-$(date +%F).db
-docker compose start
-```
-
-配成 cron，每天凌晨 4 点跑一次，保留 7 天：
-
-```bash
-# crontab -e
-0 4 * * * cd /opt/cls-news && ./backup.sh >> backup.log 2>&1
-```
-
-### 恢复
-
-```bash
-docker compose stop
-docker run --rm -v cls-news_cls-data:/data -v $(pwd)/backup:/backup alpine \
-  sh -c 'cp /backup/news-2026-11-11.db /data/news.db && rm -f /data/news.db-wal /data/news.db-shm'
-docker compose start
-```
-
-> 恢复时**必须一并删掉 `-wal` 和 `-shm`**，否则旧 WAL 会覆盖你刚恢复的数据。
-
-### 从本机迁移已有数据到服务器
-
-本机的 `data/news.db` 已经有一百多条真实数据，想带过去：
-
-```bash
-# 本地
-docker compose stop          # 或先停掉本机 java 进程
-sqlite3 data/news.db ".backup /tmp/news.db"
-
-# 上传后写入卷
-scp /tmp/news.db root@服务器IP:/tmp/
-ssh root@服务器IP "docker run --rm -v cls-news_cls-data:/data -v /tmp:/backup alpine \
-  sh -c 'cp /backup/news.db /data/news.db && chown -R 999:999 /data'"
-```
+**回滚**：没有自动回滚，镜像 tag 固定 `cls-news:0.1.0`，新镜像会覆盖旧的。正确做法是
+`git revert <坏提交>` 再推一次。急的时候可以直接 `docker compose up -d`（不重建）先把容器拉起来，
+但代码还是新的 —— 别把「重启成功」当成「回滚成功」。
 
 ---
 
-## 六、故障排查
+## 五、备份与恢复
+
+数据只有一个 SQLite 文件，丢了就是全丢。**这条是唯一不能省的运维动作。**
+
+### 为什么不能 `cp` / `docker cp` / `tar`
+
+库跑在 `journal_mode=WAL` + `synchronous=NORMAL` 下，最近的写入可能还躺在 `-wal` 里没回主库。
+实测：造一个 2 行的库、让其中 1 行只在 WAL 里，然后两种方式各拷一次 ——
+
+| 方式 | 备份里的数据 |
+|---|---|
+| `cp news.db` | 1 行，WAL 里那条没了 |
+| `sqlite3 news.db ".backup ..."` | 2 行，完整 |
+
+那次实验里主库 8192 字节、`-wal` 12392 字节：**WAL 比主库还大**，`cp` 丢的不是一点点。
+更糟的是两个文件分别拷贝之间应用还在写，拼起来可能是从未存在过的状态 —— 能打开、能查询、内容是坏的。
+
+### `backup.sh` 做四件事
+
+1. `sqlite3 .backup`（Online Backup API）拿一致快照，不停服务、不加锁；
+2. 对副本跑 `PRAGMA integrity_check`，不是 `ok` 直接失败，不产出「看起来成功」的坏备份；
+3. `PRAGMA wal_checkpoint(TRUNCATE)` + 删副本的 `-wal`/`-shm`（否则恢复时会回放不属于它的 WAL）；
+4. gzip + 权限 600 落盘 `/opt/cls-news-backup`，清 7 天前的；配了 `OSS_URL` 再传一份异地。
+
+```bash
+systemctl list-timers cls-news-backup.timer     # 下次/上次执行时间
+journalctl -u cls-news-backup -n 30 --no-pager  # 失败原因
+ls -lh /opt/cls-news-backup                     # 现有备份
+```
+
+### 恢复：先演练，别拿生产练手
+
+```bash
+./deploy/cloud/restore.sh                      # 列出可用备份
+./deploy/cloud/restore.sh --drill              # 只读演练最新一份，一个字节都不写
+./deploy/cloud/restore.sh <文件> --drill       # 演练指定的那份
+./deploy/cloud/restore.sh <文件>               # 真恢复，必须手打 yes
+./deploy/cloud/restore.sh <文件> --yes         # 跳过确认，只给脚本用
+```
+
+演练输出重点是最后三行的 **RPO**（备份落后线上多久）。实测一次：备份 678 行 / 线上 768 行 /
+落后 2 小时 2 分 / 分析状态分布与线上一致 —— 说明备份可用、只是不够新。
+
+真恢复会：校验 gzip → 校验 integrity → 打印体检报告 → 要求手打 `yes` → 停容器 →
+把当前库另存为 `news-before-restore-*.db` → **无条件删 `-wal`/`-shm`** → 覆盖 → 起容器 →
+轮询 `/healthz` → 核对行数。全程约 30 秒。
+
+> **删 `-wal` 这一步不能省**。实测过：库里有 v1/v2，备份出 b.db，之后写入 v3（进了 WAL），
+> 用 b.db 覆盖主库但不删 `-wal`，再打开得到 `v1, v2, v3` —— v3 被复活了，而且 `integrity_check` 返回 **ok**。
+> 既不是备份也不是现场的第三种状态，只能靠人肉核对行数发现。
+
+### 当前备份的缺口（说白了）
+
+| 缺口 | 后果 | 补法 |
+|---|---|---|
+| 备份和库在**同一块盘** | 磁盘坏 / 整机丢 = 数据和备份一起没 | 配 `OSS_URL`（`cls-news-backup.service` 里加一行），或 rsync 到另一台机器 |
+| **RPO 24 小时** | 最坏丢一天数据 | `OnCalendar` 由 `daily` 改 `hourly`，脚本不用动（库才 600KB） |
+| 部署前不自动备份 | 改坏代码后重启，回不到上一个数据状态 | 在 `deploy.sh` 的 `compose up` 前加一次 `backup.sh`，失败就中止 |
+
+---
+
+## 六、已知缺口（不粉饰）
+
+| 缺口 | 影响 | 什么时候必须补 |
+|---|---|---|
+| **HTTPS 链路慢** | 已上 Tunnel（`https://news.herongcan.icu`），但 CF 免费版给境内分配到美西/欧洲 PoP，实测首字节 1.2–3s、偶发 10s+，比 IP 直连的 69ms 差一个量级 | 想快就迁香港/新加坡轻量，或把备案办下来走境内直连 |
+| **8080 仍对公网开放** | 能绕过 Cloudflare 直连源站；`APP_TRUST_XFF=true` 下可伪造 IP 污染统计 | 隧道稳定后收掉安全组入方向的 8080 |
+| **单账号共用** | 十来个人一个密码，谁泄露都查不到是谁；`/api/visits/logs` 能看所有人 IP | 想认真管权限时改成一人一号（要动代码，`BasicAuthFilter` 只支持单账号） |
+| **单实例** | 不能滚动更新，重启有 20-40 秒不可用 | 需要高可用时换 Postgres + 改认领逻辑 |
+| **没有监控告警** | 挂了只有等人发现 | 加个定时 `curl /healthz` + 告警（最省事的是外部拨测服务） |
+| **`fulltext=true`** | 每个登录的人都能看财联社全文，性质是「小范围转载」 | 随时可改 `false`（只返回 60 字摘要 + 原文链接），代价很小 |
+| **`src/test` 为空** | 改 SQL 全靠手点验证 | 换数据库之前必须先补 |
+
+---
+
+## 七、故障排查（都是线上真实遇到过的）
 
 | 现象 | 最可能的原因 | 怎么确认 |
 |---|---|---|
-| 容器一直 `unhealthy` | `/healthz` 不通，或镜像里没有 curl | `docker exec cls-news curl -s localhost:8080/healthz` |
-| 启动直接退出 | `.env` 里 `APP_AUTH=true` 但密码为空 | `docker compose logs \| tail -30` 会明确写出来 |
-| 页面上有凭据但要不到数据 | `DB_PATH` 没指向 `/app/data/news.db` | `docker exec cls-news ls -l /app/data` |
-| `total` 不增长 | 财联社接口变了 / 被风控 | `/api/status` 看 `lastError` 和 `runs` |
+| 浏览器打开是运营商「域名暂时无法访问」 | 域名未备案，**按 Host 头拦截，跟端口无关** | 换成 `IP:8080` 能开就是它；走 `https://news.herongcan.icu` 则不受此限（流量不经过备案层） |
+| `https://news.herongcan.icu` 卡住十几秒或 502 | cloudflared 掉线，或 QUIC 在跨境链路上超时 | `journalctl -u cloudflared -n 30`；确认 `config.yml` 里是 `protocol: http2` |
+| 走隧道后访客 IP 全变成 `127.0.0.1` | `.env` 少了 `APP_TRUST_XFF=true`，或 `deploy.sh` 重写 `.env` 时冲掉了 | `grep TRUST_XFF /opt/cls-news/.env` |
+| 推了 `main` 但线上代码没变 | 提交里只有 `.md` 等被 `paths-ignore` 的文件 | `gh run list` 根本没有新记录 |
+| 部署成功但页面报「需要登录」 | 正常，页面内的登录层在等密码 | 输一次密码；或 `curl -u` 验接口 |
+| 用 `curl localhost:8080` 查访客看到 `172.18.0.1` | 本机请求走了 docker-proxy，源地址被改写 | 从外部机器访问就是真实 IP |
+| `/api/visits/logs` 结果很少 | `access_log` 是 11-13 部署时才建的，历史明细永久没有 | `sqlite3` 查 `visit` 表看部署前的聚合数据 |
+| 容器反复重启 | `MEM_LIMIT` 给大了，被 OOM killer 杀 | `docker inspect cls-news \| grep -i oomkilled` |
+| 容器一直 `unhealthy` | `/healthz` 读库失败（磁盘满、卷没挂上） | `docker exec cls-news ls -l /app/data`、`df -h` |
+| 页面上有凭据但要不到数据 | `DB_PATH` 没指向 `/app/data/news.db` | `docker compose config \| grep DB_PATH` |
+| 启动直接退出 | `APP_AUTH=true` 但密码为空 | `docker compose logs \| tail -30` 会写明 |
+| `total` 不增长 | 财联社改接口 / 被风控 | `/api/status` 看 `lastError` 和 `runs` |
 | `failed` 在涨 | key 失效或余额不足 | `docker compose logs \| grep 分析失败`，修好后 `POST /api/analysis/retry-failed` |
-| 日志时间差 8 小时 | 镜像里没设 `TZ` | `docker exec cls-news date` |
-| 磁盘满 | 日志没限流 | `docker system df`，compose 已配 `max-size: 10m / max-file: 3` |
-| 写入失败 read-only | Linux 绑定挂载 uid 不匹配 | 已用命名卷规避；若改绑挂载需 `chown 999:999 ./data` |
+| 日志时间差 8 小时 | 容器没设 `TZ` | `docker exec cls-news date` |
+| 想清数据重来 | `down` 不删数据，**`down -v` 会删卷** | 别手滑 |
 
 ---
 
-## 七、最后三条实话
+## 八、最后几条实话
 
-1. **「上线」在这里的含义是「一个只有你能打开的链接」，不是「一个产品」。** 别在这个阶段加账号体系、加多人权限、加移动端适配 —— 那会把你重新拉回「一直在构建、从不被检验」的老路。它现在值钱的地方是：你每天打开它看新闻，连续一个月。
+1. **它现在不是「只有你能打开的链接」，是十来个人共用一个密码的站点。**
+   这个变化不是小事：全文字段 + 公网可访问 + 多人共用账号，三件事同时成立时，性质就是「小范围转载」。
+   守住风险的办法只有两个 —— 改 `fulltext=false`，或者把账号收成一人一号。别靠「应该没人会传出去」。
 
-2. **合规风险不因「只自己看」而消失，只是降到可接受。** 全文字段、每 90 秒一轮、公开可访问，这三件事同时成立才构成问题。现在的配置是：全文 + 90 秒 + 仅自己。守住第三条。
+2. **账号密码是现在最薄的一层。** 一个共用密码、没有 HTTPS、没有登录日志（`access_log` 只记访客不记操作），
+   出了事既防不住也查不到。它比「加功能」「上 K8s」都更值得先处理。
 
-3. **最可能让你放弃的不是技术问题，是「没有新消息的焦虑」。** 财联社电报约 30 条/小时，夜里更少，打开发现没更新是正常的。别因此把间隔调到 10 秒 —— 那只会招来风控，然后把 `lastError` 变成常态。
+3. **别把「采集不到新消息」当成故障。** 财联社约 30 条/小时，夜里更少，打开发现没更新是正常的。
+   把间隔调到 10 秒只会招来风控，然后把 `lastError` 变成常态 —— 这是唯一一次真被限流的教训。

@@ -51,6 +51,20 @@ public class AppProps {
         /** 健康检查不能要密码，否则 Docker/负载均衡永远判死 */
         private String[] permitPaths = {"/healthz"};
         /**
+         * 只读账号，格式 {@code user:pass,user2:pass2}（环境变量 {@code APP_READONLY}）。
+         *
+         * <p>为什么要有它：{@link #username}/{@link #password} 那一个账号是<b>可写</b>的，
+         * 能触发分析（烧 daily-cap 配额）、能读 /api/visits/logs（含所有人的 IP）。
+         * 把这样一个账号发给朋友或面试官，等于把运维权限一起给了。
+         *
+         * <p>只读账号只能发 GET/HEAD/OPTIONS，外加一个例外 POST /api/visit/ping
+         * （访客上报，本身就是无副作用的统计）。写接口一律 403。
+         *
+         * <p>用 String 而不是 String[] 接：空字符串绑定到数组在 Spring 里行为不稳定，
+         * 这里自己 split 反而不会踩边界。
+         */
+        private String readOnly = "";
+        /**
          * 是否信任 X-Forwarded-For / X-Real-IP。
          *
          * <p>默认 false，只用 {@code getRemoteAddr()}。因为这两个头是客户端随便写的：
@@ -70,6 +84,8 @@ public class AppProps {
         public void setPassword(String password) { this.password = password; }
         public String[] getPermitPaths() { return permitPaths; }
         public void setPermitPaths(String[] permitPaths) { this.permitPaths = permitPaths; }
+        public String getReadOnly() { return readOnly; }
+        public void setReadOnly(String readOnly) { this.readOnly = readOnly; }
         public boolean isTrustForwardedHeaders() { return trustForwardedHeaders; }
         public void setTrustForwardedHeaders(boolean v) { this.trustForwardedHeaders = v; }
     }

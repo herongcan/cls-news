@@ -29,6 +29,8 @@ on:
       - '**.md'
       - 'deploy/laptop/**'
       - 'tools/eval/**'
+      # MCP server 是独立于应用的旁路工具（跑在使用者本机），改它不需要重新发版
+      - 'tools/mcp/**'
   workflow_dispatch:
     inputs:
       reason:

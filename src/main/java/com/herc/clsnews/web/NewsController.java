@@ -247,9 +247,19 @@ public class NewsController {
                         : "当前是手动模式，这些条目已重新变为可点击「分析」的状态");
     }
 
+    /**
+     * 运行状态。额外带一个 {@code role} 字段：前端靠它决定要不要显示「分析」这类写操作。
+     *
+     * <p>为什么不单独开 /api/whoami：页面启动本来就要打一次这个接口（判断有没有开鉴权），
+     * 多一个字段比多一次往返划算。没开鉴权时没有角色属性，按 rw 处理 —— 那种状态下
+     * 本来就没有保护，报 ro 只会让页面莫名其妙藏掉按钮。
+     */
     @GetMapping("/status")
-    public Map<String, Object> status() {
-        return stats();
+    public Map<String, Object> status(HttpServletRequest req) {
+        Map<String, Object> body = new LinkedHashMap<>(stats());
+        Object role = req.getAttribute(BasicAuthFilter.ROLE_ATTR);
+        body.put("role", role == null ? "rw" : role);
+        return body;
     }
 
     /**

@@ -89,6 +89,18 @@
   .pill.down{color:var(--down);border-color:rgba(47,166,106,.45)}
   .pill.flat{color:var(--muted);border-color:var(--line-2)}
   .why{font-size:12px;color:var(--muted)}
+  /* 板块标签：比个股低一级，用冷色，避免和红绿的涨跌语义撞车 */
+  .sec{font-size:10.5px;padding:1px 6px;border-radius:3px;margin-left:4px;
+       color:#8fb8d8;background:rgba(120,170,220,.10);border:.5px solid rgba(120,170,220,.25)}
+  /* 模型判的个股：带市场前缀 + 方向箭头，理由放 title */
+  .astk{font-size:11px;padding:1px 6px;border-radius:3px;margin-left:4px;
+        border:.5px solid var(--line-2);white-space:nowrap}
+  .astk.up{color:var(--up);border-color:rgba(229,72,77,.35)}
+  .astk.down{color:var(--down);border-color:rgba(47,166,106,.35)}
+  .astk.flat{color:var(--muted)}
+  .astk i{font-style:normal;opacity:.55;margin-right:3px;font-size:10px}
+  /* 映射推导：故意做得比结论更轻，它说的是「怎么推出来的」，不是事实本身 */
+  .inf{font-size:11px;color:#7f8790;margin-left:6px;font-style:italic}
   /* 分析按钮：默认低调，hover 才亮，避免整页都是按钮抢走新闻本身的注意力 */
   button.act{font-size:11px;padding:1px 8px;border-radius:4px;line-height:1.7;
              display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
@@ -438,7 +450,7 @@
     return day.today ? hm : day.text + ' ' + hm;
   }
 
-  /** 结论部分：方向 + 置信度 + 一句话理由。没有分析结果时返回空串。 */
+  /** 结论部分：方向 + 置信度 + 一句话理由 + 板块 + 个股。没有分析结果时返回空串。 */
   function pillHtml(a) {
     if (!a) return '';
     const s = a.sentiment || 'neutral';
@@ -447,7 +459,27 @@
     const conf = typeof a.confidence === 'number'
         ? ' ' + Math.round(a.confidence * 100) + '%' : '';
     const why = a.summary ? '<span class="why">' + esc(a.summary) + '</span>' : '';
-    return '<span class="pill ' + cls + '">' + label + conf + '</span>' + why;
+    const secs = (a.sectors || []).filter(Boolean).slice(0, 4)
+        .map(x => '<span class="sec">' + esc(x) + '</span>').join('');
+    const stks = (a.stocks || []).filter(x => x && (x.name || x.code)).slice(0, 4)
+        .map(anaStock).join('');
+    // inference 只在「原文没标个股、方向靠映射得出」时才有内容，是这轮改造的主要产出
+    const inf = a.inference ? '<span class="inf">↳ ' + esc(a.inference) + '</span>' : '';
+    return '<span class="pill ' + cls + '">' + label + conf + '</span>' + why + secs + stks + inf;
+  }
+
+  /**
+   * 模型判出来的个股：带市场前缀和方向箭头，悬停看理由。
+   * 跟下面 stockChip（财联社原文的来源标注）不是一回事，渲染时别混。
+   * 老数据没有 market 字段，此时不显示市场前缀。
+   */
+  function anaStock(x) {
+    const cls = x.impact === 'bullish' ? 'up' : x.impact === 'bearish' ? 'down' : 'flat';
+    const arrow = x.impact === 'bullish' ? '↑' : x.impact === 'bearish' ? '↓' : '·';
+    const mk = x.market ? '<i>' + esc(x.market) + '</i>' : '';
+    const tip = (x.reason || '') + (x.market ? '（' + x.market + '）' : '');
+    return '<span class="astk ' + cls + '" title="' + esc(tip) + '">'
+        + mk + esc(x.name || x.code) + arrow + '</span>';
   }
 
   /**

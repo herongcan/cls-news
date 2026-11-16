@@ -564,8 +564,9 @@ ssh root@IP 'curl -s http://127.0.0.1:20241/metrics | grep -E "ha_connections|re
 
 1. **`APP_TRUST_XFF=true` 不能丢。** cloudflared 会把真实客户端 IP 写进 `X-Forwarded-For`，
    不开这一项，所有访客都记成 `127.0.0.1`，统计全废 —— 而且**不报错**，只是数字永远不动。
-   已写进 `/opt/cls-news/.env`，但 `deploy.sh` 每次重写 `.env`，**它不写这一行，会被冲掉**。
-   下次改 `deploy.sh` 时要补上 `echo "APP_TRUST_XFF=true"`。
+   `deploy.sh` 原本每次整个重写 `.env`，会把这一行冲掉；2026-11-16 已改成和 `APP_READONLY`
+   同样的逻辑（显式给了就用，没给就回读远端），并写进 `.env`。**改动那段代码前先看懂注释**，
+   否则下一次发版会静默把访客统计弄坏。
 2. **8080 现在还是公网可达的（安全组没关）。** 这意味着：能绕过 Cloudflare 直连源站，
    也能在开头的 `X-Forwarded-For` 里伪造 IP。要收就收安全组入方向的 8080 规则（只留 22），
    收掉之后 `IP:8080` 这个地址就失效了 —— 目前它还是隧道出问题时的唯一退路，所以先留着。

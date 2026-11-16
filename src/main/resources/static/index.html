@@ -22,7 +22,7 @@
     --up-line:rgba(229,72,77,.45); --down-line:rgba(47,166,106,.45);
     --up-line-weak:rgba(229,72,77,.35); --down-line-weak:rgba(47,166,106,.35);
     --sec-fg:#8fb8d8; --sec-bg:rgba(120,170,220,.10); --sec-line:rgba(120,170,220,.25);
-    --infer:#7f8790; --on-accent:#0a0b0d;
+    --infer:#7f8790; --on-accent:#0a0b0d; --on-amber:#0a0b0d;
   }
   /* 浅色：微暖米白。红绿都往下压了一档 —— #e5484d / #2fa66a 直接放白底上会发虚，
      对比度不够，十几条连读下来眼睛很累；琥珀同理，否则标签像褪色印刷。 */
@@ -37,7 +37,7 @@
     --up-line:rgba(199,54,60,.42); --down-line:rgba(26,127,85,.42);
     --up-line-weak:rgba(199,54,60,.32); --down-line-weak:rgba(26,127,85,.32);
     --sec-fg:#2f6b8f; --sec-bg:rgba(47,107,143,.07); --sec-line:rgba(47,107,143,.22);
-    --infer:#7a7568; --on-accent:#ffffff;
+    --infer:#7a7568; --on-accent:#ffffff; --on-amber:#ffffff;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
@@ -92,9 +92,13 @@
   .time .stack{display:flex;flex-direction:column;line-height:1.3}
   .time .dd{font-size:10px;color:var(--dim);opacity:.72;letter-spacing:.02em}
   .time .dd.today{opacity:.9;color:var(--amber)}
+  /* 财联社自己的重要度分级，我们只是原样显示 A/B（C 占 92%，标出来等于没信息）。
+     两级必须一眼分得开：A 用实心琥珀，B 保持空心描边 —— 光靠一个字母，
+     在 56px 的窄列里几乎看不出差别。 */
   .lv{font-size:10px;line-height:1.4;text-align:center;border-radius:3px;
       padding:0 4px;width:fit-content;border:.5px solid var(--line-2);color:var(--dim)}
-  .lv.a{color:var(--amber);border-color:var(--amber-line)}
+  .lv.a{color:var(--on-amber);background:var(--amber);border-color:var(--amber)}
+  .lv.b{color:var(--amber);border-color:var(--amber-line)}
   .txt{margin:0;white-space:pre-wrap;word-break:break-word}
   a.title{color:var(--text);text-decoration:none;border-bottom:.5px solid transparent}
   a.title:hover{border-bottom-color:var(--line-2)}
@@ -653,8 +657,12 @@
     if (isNew) li.className = 'new';
     itemsById.set(n.id, n);
     const lv = (n.level || '').toUpperCase();
-    const lvHtml = (lv === 'A' || lv === 'B')
-        ? '<span class="lv a">' + lv + '</span>' : '';
+    // 悬停说明这级到底代表什么 —— 单看字母没人知道 A 和 B 差在哪
+    const lvHtml = lv === 'A'
+        ? '<span class="lv a" title="财联社重要度 A 级：编辑认定的头条级消息">A</span>'
+        : lv === 'B'
+            ? '<span class="lv b" title="财联社重要度 B 级：编辑挑出的宏观 / 外交 / 大盘类消息">B</span>'
+            : '';
     const stocks = (n.stocks || []).map(stockChip).join('');
 
     const day = fmtDay(n.time);

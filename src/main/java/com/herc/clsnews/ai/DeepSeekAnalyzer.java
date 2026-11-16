@@ -26,6 +26,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 /**
  * DeepSeek 实现。开了 {@code app.analysis.provider=deepseek} 才会创建。
@@ -34,7 +35,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * <ol>
  *   <li><b>提示词不在代码里</b>：从 prompts/analyze-news.md 读，改完重启即可，不用重新编译。</li>
  *   <li><b>模型输出不能直接信</b>：sentiment 只认三个值，confidence 越界就夹住，
- *       低于 0.5 一律降级为 neutral（这是提示词里的约定，代码这里兜底，不然模型偶尔会硬给方向）。</li>
+ *       code 按市场白名单校验（认不出的丢掉代码、保留名称）。
+ *       这里<b>不再</b>把低置信度降级成 neutral —— 那条规则和提示词里的同款互相强化，
+ *       实测让 60% 的结论退化成「信息不足」。</li>
  *   <li><b>失败要能看懂</b>：401/402/429 各自给出人话解释，而不是丢一个 JSON 原文让人猜。</li>
  * </ol>
  *
@@ -51,6 +54,15 @@ public class DeepSeekAnalyzer implements Analyzer {
     private static final String PROMPT_RESOURCE = "prompts/analyze-news.md";
     private static final Set<String> DIRECTIONS = Set.of("bullish", "neutral", "bearish");
     private static final int MAX_ATTEMPTS = 2;
+
+    /** 三市场的代码形态。认不出的一律丢弃代码、保留名称，不丢整条记录。 */
+    private static final Pattern CN_CODE = Pattern.compile("^(sh|sz|bj)\\d{6}$");
+    private static final Pattern HK_CODE = Pattern.compile("^hk\\d{4,5}$");
+    private static final Pattern HK_BARE = Pattern.compile("^\\d{4,5}$");
+    private static final Pattern US_CODE = Pattern.compile("^[A-Z]{1,5}(\\.[A-Z]{1,2})?$");
+
+    /** 模型自造的代码占位词。库里实测出现过「未标注」×4、OX、87、15、03、02。 */
+    private static final Set<String> CODE_NOISE = Set.of("未标注", "未标", "未知", "无", "-", "null");
 
     private final AppProps props;
     private final ObjectMapper mapper;
@@ -233,24 +245,47 @@ public class DeepSeekAnalyzer implements Analyzer {
         double confidence = j.path("confidence").asDouble(0.5);
         confidence = Math.max(0, Math.min(1, confidence));
         confidence = Math.round(confidence * 100) / 100.0;
+        // 这里原本有个「confidence < 0.5 一律降 neutral」的兜底，和提示词第 3 条互相强化：
+        // 模型倾向报低置信 → 全被压成中性 → 摘要只剩「信息不足」。
+        // 方向判断归模型，置信度只表达把握大小，不再改写结论。
 
-        String summary = clip(j.path("summary").asText(""), 60);
+        // 提示词要求 40 字以内，但模型经常写到 60~80 字。这里给到 100 是为了不被截成半句
+        //（实测「…对离岸架构避税的吸引」这种断头话，比长一点难看得多）
+        String summary = clip(j.path("summary").asText(""), 100);
         if (summary.isBlank()) {
-            summary = "信息不足";
+            // 不再兜底成「信息不足」：那是没有信息量的模板话，还会污染评测统计
+            log.warn("模型没给 summary，结论 [{}]", sentiment);
         }
-        if (confidence < 0.5 && !"neutral".equals(sentiment)) {
-            // 提示词第 3 条要求低于 0.5 给 neutral，模型偶尔不执行，这里兜底
-            log.debug("置信度 {} 低于 0.5，方向 {} 降级为 neutral", confidence, sentiment);
-            sentiment = "neutral";
+
+        String inference = clip(j.path("inference").asText(""), 120);
+
+        List<String> sectors = new ArrayList<>();
+        for (JsonNode s : j.path("sectors")) {
+            String v = clip(s.asText(""), 12);
+            if (!v.isBlank() && !sectors.contains(v)) {
+                sectors.add(v);
+            }
+            if (sectors.size() >= 6) {
+                break;
+            }
         }
 
         List<AnalysisResult.StockImpact> stocks = new ArrayList<>();
         for (JsonNode s : j.path("stocks")) {
-            String code = clip(s.path("code").asText(""), 20);
+            String rawCode = clip(s.path("code").asText(""), 20);
             String name = clip(s.path("name").asText(""), 20);
-            if (code.isBlank() && name.isBlank()) {
+            if (rawCode.isBlank() && name.isBlank()) {
                 continue;
             }
+
+            // 代码前缀比模型自报的 market 可靠（「market 写美股、代码却是 sh600362」实测出现过）
+            String byCode = marketOf("", rawCode);
+            String market = byCode.isBlank() ? marketOf(s.path("market").asText(""), "") : byCode;
+            String code = canonicalCode(market, rawCode);
+            if (code.isBlank() && !rawCode.isBlank()) {
+                log.debug("丢弃非法代码 [{}]（{}）", rawCode, name);
+            }
+
             // 模型会编股票代码（实测把新易盛写成 sz300500，真值是 sz300502）。
             // 财联社原文的 stock_list 带权威代码，名字对得上就以来源为准。
             String truth = sourceCodes.get(name);
@@ -258,16 +293,92 @@ public class DeepSeekAnalyzer implements Analyzer {
                 if (!code.isBlank()) {
                     log.debug("股票代码纠正 {}：模型给 {}，来源为 {}", name, code, truth);
                 }
-                code = truth;
+                code = truth.toLowerCase(Locale.ROOT);
+                market = "A股";
             }
+            if (code.isBlank() && name.isBlank()) {
+                continue;
+            }
+
             String impact = s.path("impact").asText("").toLowerCase(Locale.ROOT);
             if (!DIRECTIONS.contains(impact)) {
                 impact = "neutral";
             }
-            stocks.add(new AnalysisResult.StockImpact(code, name, impact,
+            stocks.add(new AnalysisResult.StockImpact(market, code, name, impact,
                     clip(s.path("reason").asText(""), 60)));
+            if (stocks.size() >= 8) {
+                break;
+            }
         }
-        return new AnalysisResult(sentiment, confidence, summary, stocks, model);
+        return new AnalysisResult(sentiment, confidence, summary, inference, sectors, stocks, model);
+    }
+
+    /** 板块/市场标签 → 标准三值；认不出返回空串，由调用方决定回退。 */
+    private String marketOf(String raw, String code) {
+        String m = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
+        if (m.contains("港股") || m.contains("香港") || m.equals("hk")) {
+            return "港股";
+        }
+        if (m.contains("美股") || m.contains("美国") || m.equals("us")) {
+            return "美股";
+        }
+        if (m.contains("a股") || m.contains("沪深") || m.contains("中国") || m.equals("cn")) {
+            return "A股";
+        }
+        String c = code == null ? "" : code.trim().toLowerCase(Locale.ROOT);
+        if (c.startsWith("sh") || c.startsWith("sz") || c.startsWith("bj")) {
+            return "A股";
+        }
+        if (c.startsWith("hk")) {
+            return "港股";
+        }
+        return "";
+    }
+
+    /**
+     * 按市场校验代码格式，认不出就返回空串（保留名称，不丢整条）。
+     * 库里实测有 9 条脏代码：「未标注」×4、OX、87、15、03、02 —— 全是模型自造的占位。
+     */
+    private String canonicalCode(String market, String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String c = raw.trim();
+        if (c.isEmpty()) {
+            return "";
+        }
+        String lower = c.toLowerCase(Locale.ROOT);
+        // 只允许字母数字和点，「未标注」这类中文占位直接出局
+        if (CODE_NOISE.contains(lower) || !lower.matches("[a-z0-9.]+")) {
+            return "";
+        }
+        return switch (market) {
+            case "A股" -> CN_CODE.matcher(lower).matches() ? lower : "";
+            case "港股" -> {
+                if (HK_CODE.matcher(lower).matches()) {
+                    yield lower;
+                }
+                yield HK_BARE.matcher(lower).matches() ? "hk" + lower : "";
+            }
+            case "美股" -> {
+                String u = lower.toUpperCase(Locale.ROOT);
+                if (u.startsWith("US") && u.length() > 2) {
+                    u = u.substring(2);
+                }
+                yield US_CODE.matcher(u).matches() ? u : "";
+            }
+            default -> {
+                // market 缺失时只认代码前缀自证的 A 股/港股。
+                // 纯字母不做美股推断 —— 否则模型写的「OX」会被当成真 ticker 存进去。
+                if (CN_CODE.matcher(lower).matches()) {
+                    yield lower;
+                }
+                if (HK_CODE.matcher(lower).matches()) {
+                    yield lower;
+                }
+                yield HK_BARE.matcher(lower).matches() ? "hk" + lower : "";
+            }
+        };
     }
 
     /** 来源 stock_list 里的 名称 → 代码，用于纠正模型编造的代码。 */

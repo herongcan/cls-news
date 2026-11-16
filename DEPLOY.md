@@ -15,7 +15,7 @@
 | 项 | 现状 |
 |---|---|
 | 机器 | 阿里云 ECS，杭州，2 vCPU / 1740 MB / 40G 系统盘（已用 16%），Ubuntu 24.04.5 LTS |
-| 入口 | `http://8.136.19.57:8080`，**IP 直连，没有 HTTPS** |
+| 入口 | `https://news.herongcan.icu`（Cloudflare Tunnel，证书由 CF 边缘签发）；`http://8.136.19.57:8080` 仍可直连，作为隧道故障时的退路 |
 | 容器 | `cls-news:0.1.0`（运行镜像 568MB，基础 JRE 432MB），`mem_limit 512m`，`restart: unless-stopped` |
 | 实测占用 | 常驻 198 MiB / 512 MiB，CPU 0.09%，`load average 0.04` |
 | 数据 | 命名卷 `cls-news_cls-data` → `/app/data/news.db`（WAL 模式） |
@@ -23,10 +23,10 @@
 | 明细清理 | 应用内 `AccessLogCleaner` 每天 04:40 删 90 天前的 `access_log` |
 | 发版 | 推 `main` → GitHub Actions 编译 → rsync → 远端 `docker compose up -d --build` |
 | 账号 | 单账号 Basic，十来个人共用（**弱项，见第六节**） |
-| 域名 | `herongcan.icu` A 记录已指向本机，但 ICP 备案被卡，所以域名暂时打不开 |
+| 域名 | `news.herongcan.icu` CNAME → `<tunnel-id>.cfargotunnel.com`。**未做 ICP 备案**，靠 Tunnel 出站长连接绕开拦截，公网零入站端口 |
 
-服务端依赖只有三样：Docker 29.1.3（compose 2.40.3）、宿主机 `sqlite3` 3.45.1（备份脚本用）、22 + 8080 两个开放端口。
-没有 Nginx/Caddy、没有外部数据库、没有 Redis —— 一个容器加一个卷，就这些。
+服务端依赖只有四样：Docker 29.1.3（compose 2.40.3）、宿主机 `sqlite3` 3.45.1（备份脚本用）、`cloudflared` 2026.11.0（systemd 常驻）、22 + 8080 两个开放端口。
+没有 Nginx/Caddy、没有外部数据库、没有 Redis —— 一个容器、一个卷、一条出站隧道，就这些。
 
 ---
 
@@ -77,7 +77,7 @@ echo '/swapfile none swap sw 0 0' >> /etc/fstab
 ```
 
 安全组只开两个端口：**22**（GitHub runner 要能 ssh 进来）和 **8080**（同事访问）。
-80/443 现在留着没用 —— 没有证书、也没有可用域名。
+80/443 不用开，以后也不用 —— HTTPS 走 Cloudflare Tunnel，公网零入站端口。
 
 ### 2. 放代码
 
@@ -311,7 +311,8 @@ ls -lh /opt/cls-news-backup                     # 现有备份
 
 | 缺口 | 影响 | 什么时候必须补 |
 |---|---|---|
-| **没有 HTTPS** | Basic 凭据是 Base64 明文过公网，同 WiFi 下能还原出账号密码 | 备案一通就补（Caddy 自动签证书） |
+| **HTTPS 链路慢** | 已上 Tunnel（`https://news.herongcan.icu`），但 CF 免费版给境内分配到美西/欧洲 PoP，实测首字节 1.2–3s、偶发 10s+，比 IP 直连的 69ms 差一个量级 | 想快就迁香港/新加坡轻量，或把备案办下来走境内直连 |
+| **8080 仍对公网开放** | 能绕过 Cloudflare 直连源站；`APP_TRUST_XFF=true` 下可伪造 IP 污染统计 | 隧道稳定后收掉安全组入方向的 8080 |
 | **单账号共用** | 十来个人一个密码，谁泄露都查不到是谁；`/api/visits/logs` 能看所有人 IP | 想认真管权限时改成一人一号（要动代码，`BasicAuthFilter` 只支持单账号） |
 | **单实例** | 不能滚动更新，重启有 20-40 秒不可用 | 需要高可用时换 Postgres + 改认领逻辑 |
 | **没有监控告警** | 挂了只有等人发现 | 加个定时 `curl /healthz` + 告警（最省事的是外部拨测服务） |
@@ -324,7 +325,9 @@ ls -lh /opt/cls-news-backup                     # 现有备份
 
 | 现象 | 最可能的原因 | 怎么确认 |
 |---|---|---|
-| 浏览器打开是运营商「域名暂时无法访问」 | 域名未备案，**按 Host 头拦截，跟端口无关** | 换成 `IP:8080` 能开就是它 |
+| 浏览器打开是运营商「域名暂时无法访问」 | 域名未备案，**按 Host 头拦截，跟端口无关** | 换成 `IP:8080` 能开就是它；走 `https://news.herongcan.icu` 则不受此限（流量不经过备案层） |
+| `https://news.herongcan.icu` 卡住十几秒或 502 | cloudflared 掉线，或 QUIC 在跨境链路上超时 | `journalctl -u cloudflared -n 30`；确认 `config.yml` 里是 `protocol: http2` |
+| 走隧道后访客 IP 全变成 `127.0.0.1` | `.env` 少了 `APP_TRUST_XFF=true`，或 `deploy.sh` 重写 `.env` 时冲掉了 | `grep TRUST_XFF /opt/cls-news/.env` |
 | 推了 `main` 但线上代码没变 | 提交里只有 `.md` 等被 `paths-ignore` 的文件 | `gh run list` 根本没有新记录 |
 | 部署成功但页面报「需要登录」 | 正常，页面内的登录层在等密码 | 输一次密码；或 `curl -u` 验接口 |
 | 用 `curl localhost:8080` 查访客看到 `172.18.0.1` | 本机请求走了 docker-proxy，源地址被改写 | 从外部机器访问就是真实 IP |

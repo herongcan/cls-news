@@ -41,12 +41,13 @@
 **22 也必须对 `0.0.0.0/0` 开放** —— GitHub Actions 的 runner 在境外，收紧到自己家 IP 会让自动发版直接失效
 （报错是「连不上」，看着像密钥问题）。
 
-80/443 现在用不上，可以先关着：没有证书，域名也还没备案。
+**80/443 不需要开，以后也不需要**：HTTPS 走 Cloudflare Tunnel（出站长连接，公网零入站端口），
+见第五节。8080 是现在唯一的入站业务端口；隧道稳定后这一步可以收掉。
 
 > 为什么用 8080 不用 80：国内服务器**用 IP 访问 80 端口不需要备案，但用域名必须备案**。
 > 注意备案拦截按 HTTP Host 头判定、**与端口无关**：域名没备案时，走 80 和走 8080
 > 都会返回运营商的拦截页。所以「换个非标端口就能用域名」是不成立的，
-> 只能备案，或者继续用 IP 直连。
+> 只有三条路：备案、继续用 IP 直连、或者走 Cloudflare Tunnel（第五节，已采用）。
 
 
 ### 2. 加 swap（内存越小越不能省）
@@ -499,58 +500,92 @@ cd /opt/cls-news && docker compose logs --tail=80
 
 ## 五、两个你必须知道的限制
 
-### 1. 现在没有 HTTPS
+### 1. HTTPS：走 Cloudflare Tunnel（2026-11-16 上线）
 
-**当前状态：域名 herongcan.icu 解析已生效，但 ICP 备案未完成，因此不能对外使用。**
+**当前入口：`https://news.herongcan.icu`**，证书由 Cloudflare 边缘签发，源站不装证书、不开 80/443。
 
-实测：`http://herongcan.icu:8080/` 在浏览器里返回的是运营商的「域名暂时无法访问」页面，
-**不是应用页面**。拦截按 HTTP Host 头判定，跟端口无关，换端口绕不过去。
-所以同事现在只能用 `http://8.136.19.57:8080`。
+为什么是这条路，而不是 Caddy：**域名没有 ICP 备案**，直连 80/443 会被运营商按 Host 头拦掉（跟端口无关，
+换 8080 一样拦）；而 Let's Encrypt / ZeroSSL **都不给裸 IP 签 DV 证书**，自签会满屏红警告。
+Tunnel 绕开了这两条：它是**出站**长连接 —— 本机主动连 Cloudflare 边缘，公网没有任何入站端口，
+请求从边缘顺着这条连接推进来，不经过备案拦截那一层。
 
-备案卡在「**没有可备案的服务器**」：阿里云生成备案服务码要求 ECS 为**包年包月**、剩余时长 **> 3 个月**、
-中国内地节点、有公网带宽；按量付费实例和免费试用实例都不生成服务码。
-现有实例是 `ecs.e-c1m1.large`（杭州），已确认不满足这一条 —— 这不是填错表，是资格问题，只能换计费方式或换机器。
+```
+用户 → 最近的 Cloudflare 边缘 → (QUIC/HTTP2 出站隧道) → 本机 cloudflared → 127.0.0.1:8080
+```
 
-三条出路，按代价排：
+#### 组成（都已就位）
 
-1. 把实例转成包年包月（或续费到剩余 > 3 个月），再重新申请备案服务码；
-2. 新买一台符合条件的最低配包年包月实例，只用来拿备案服务码，服务仍跑在现在这台；
-3. 暂时不备案，继续用 `IP:8080`（同事已经在用，只是地址难记、且没有 HTTPS）。
+| 位置 | 内容 |
+|---|---|
+| 服务器 `/usr/local/bin/cloudflared` | 2026.11.0，官方二进制 |
+| `/etc/cloudflared/config.yml` | 配置，仓库里那份是 `deploy/cloud/cloudflared.yml`（`tunnel:` 里的 ID 是这台的，别拿去别的机器用） |
+| `/etc/cloudflared/<tunnel-id>.json` | 隧道凭据，权限 600，**泄漏等于把这条隧道交出去** |
+| systemd | `cloudflared.service`，`restart` 重启、`journalctl -u cloudflared -f` 看日志 |
+| DNS | `news.herongcan.icu` CNAME → `<tunnel-id>.cfargotunnel.com`（橙云代理必须开着） |
+| `.env` | `APP_TRUST_XFF=true` |
 
-备案通过后：把 `deploy.sh` 的 `DOMAIN_READY` 设为 1 重新部署，访问地址会自动切成域名；
-再按下面的步骤套 Caddy 就能有 HTTPS。
+域名的 NS 早就在 Cloudflare（`may.ns` / `bob.ns`），所以这一步没碰注册商。
 
-Basic Auth 的密码是**明文过公网**的（Base64 只是编码），同一 WiFi 下会抓包的人能还原出
-`账号:密码`。这一点在不上 HTTPS 的前提下无法消除，只能靠强密码 + 定期更换降低影响。
+#### 为什么 `protocol: http2` 而不是默认的 quic
 
-想补 HTTPS 时必须先过备案这一关，通过后在宿主机装一层 Caddy 即可（应用和 compose 不用动结构）：
+默认走 QUIC。这条链路（杭州 → 洛杉矶）实测 QUIC 极易超时：10 分钟里 8 次
+`failed to dial to edge with quic`，TTFB 飙到 12 秒。`http2` 走 TCP，有拥塞控制兜底，抗丢包明显更好。
+**别改回默认值**，除非你换到了离边缘更近的机房。
+
+#### 实测延迟（2026-11-16，这就是这条路线的真实代价）
+
+| 路径 | 首字节 |
+|---|---|
+| 本机 → `127.0.0.1:8080`（容器内） | 6 ms |
+| 本机 → `http://8.136.19.57:8080`（IP 直连） | 69 ms |
+| 本机 → `https://news.herongcan.icu` | **1.2 – 3 s，偶发 10 s+** |
+
+原因不是配置问题，是地理：Cloudflare 免费版给境内用户分配的 PoP 在**美西/欧洲**（实测 `cf-ray` 落在
+`LAX` 和 `AMS`），链路变成「深圳 → 洛杉矶 → 杭州」，跨两次太平洋，且丢包会导致 `total` 远大于 `ttfb`。
+TLS 握手本身就要 0.4–1.8 秒。
+
+**结论**：这条路线解决的是「有没有 HTTPS」和「要不要备案」，不解决「快不快」。
+给朋友看、面试演示够用；日常十来个人高频用，体感会明显比以前差。
+
+#### 日常维护
 
 ```bash
-# apt 源在国内可达，不用拉 Docker 镜像（这台机器直连 Docker Hub 会超时）
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update && sudo apt install -y caddy
+# 改配置 → 必须 restart，reload 不生效
+ssh root@IP 'vim /etc/cloudflared/config.yml && systemctl restart cloudflared'
+
+# 看隧道是否 4 条连接都在
+ssh root@IP 'journalctl -u cloudflared -n 20 --no-pager | grep Registered'
+
+# 隧道指标（连接数、回源错误）
+ssh root@IP 'curl -s http://127.0.0.1:20241/metrics | grep -E "ha_connections|request_errors"'
 ```
 
-`/etc/caddy/Caddyfile`：
+#### 三个必须记住的坑
 
-```
-herongcan.icu {
-    reverse_proxy 127.0.0.1:8080
-}
-```
+1. **`APP_TRUST_XFF=true` 不能丢。** cloudflared 会把真实客户端 IP 写进 `X-Forwarded-For`，
+   不开这一项，所有访客都记成 `127.0.0.1`，统计全废 —— 而且**不报错**，只是数字永远不动。
+   已写进 `/opt/cls-news/.env`，但 `deploy.sh` 每次重写 `.env`，**它不写这一行，会被冲掉**。
+   下次改 `deploy.sh` 时要补上 `echo "APP_TRUST_XFF=true"`。
+2. **8080 现在还是公网可达的（安全组没关）。** 这意味着：能绕过 Cloudflare 直连源站，
+   也能在开头的 `X-Forwarded-For` 里伪造 IP。要收就收安全组入方向的 8080 规则（只留 22），
+   收掉之后 `IP:8080` 这个地址就失效了 —— 目前它还是隧道出问题时的唯一退路，所以先留着。
+3. **`vip` / `X-Forwarded-For` 只信最左段。** 见 `ClientIp.of()`：`trustForwarded=true` 时取 XFF 第一个逗号前的部分。
+   多级代理（CDN 套 CDN）时这会取到上一跳代理的地址，不是真实客户端。
 
-然后要改**三处**，否则 Caddy 起不来、或者 8080 还裸在公网上把 HTTPS 绕过去：
+#### 想换成更快的那两条路
+
+| 备选 | 适合 | 代价 |
+|---|---|---|
+| 香港 / 新加坡轻量（域名直接 A 记录 + Caddy） | 正经给一批人用 | 迁机器、迁库（单文件 SQLite，`backup.sh` 已有 rsync 逻辑）、约 24–30 元/月 |
+| 境内 + ICP 备案 | 长期方案 | 备案要包年包月实例 + 剩余 > 3 个月，等 1–3 周 |
+
+两条路的核心差别只是「谁来签证书」：Caddy 一行 `reverse_proxy` 就自动签 Let's Encrypt。
+但**必须同时改三处**，否则起点是 Caddy 起不来、终点是 8080 把 HTTPS 绕过去：
 
 1. `/opt/cls-news/.env` 里 `BIND_ADDR=127.0.0.1`（只监听本机，让 Caddy 独占公网）；
-2. `deploy/cloud/deploy.sh` 里 `echo "BIND_ADDR=0.0.0.0"` 改成 `127.0.0.1` —— **这一步不能只改 .env**，
-   脚本每次发版都会重写 `.env`，只改文件会在下一次部署后恢复成 0.0.0.0，等于又把 HTTP 端口敞开了；
-3. 安全组把 8080 从 `0.0.0.0/0` 收紧成不需要（只留 22/80/443）。
-
-`systemctl reload caddy` 生效，证书自动申请续期。
+2. `deploy/cloud/deploy.sh` 里 `echo "BIND_ADDR=0.0.0.0"` 改成 `127.0.0.1` —— **不能只改 .env**，
+   脚本每次发版都会重写 `.env`，只改文件会在下一次部署后恢复成 0.0.0.0；
+3. 安全组收掉 8080（只留 22/80/443）。
 
 ### 2. DeepSeek 余额要盯
 

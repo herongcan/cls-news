@@ -167,6 +167,18 @@ if [[ -z "${APP_READONLY:-}" ]]; then
   fi
 fi
 
+# 反向代理信任：**必须沿用远端值**。
+# 2026-11-16 起前台是 Cloudflare Tunnel，cloudflared 在 X-Forwarded-For 里写真实
+# 客户端 IP，靠 APP_TRUST_XFF=true 才取得到。这一行如果被重写成 false，访客会全部
+# 记成 127.0.0.1 —— 而且不报错，只是数字从此冻住，通常要过好几天才有人发现。
+# 所以和 APP_READONLY 一样：显式给了就用，没给就回读远端。
+if [[ -z "${APP_TRUST_XFF:-}" ]]; then
+  APP_TRUST_XFF="$(ssh "$HOST" "sed -n 's/^APP_TRUST_XFF=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  if [[ -n "$APP_TRUST_XFF" ]]; then
+    say "沿用远端已有的 APP_TRUST_XFF=$APP_TRUST_XFF"
+  fi
+fi
+
 say "写入远端 .env"
 {
   echo "# 由 deploy.sh 生成，不要提交"
@@ -176,6 +188,9 @@ say "写入远端 .env"
   echo "APP_USER=$APP_USER_NAME"
   echo "APP_PASSWORD=$APP_PW"
   echo "APP_READONLY=${APP_READONLY:-}"
+  # 默认 false：没有反向代理时信任 XFF 等于允许伪造 IP（见 ClientIp 的注释）。
+  # 挂了 Tunnel / Caddy / Nginx 就必须是 true，否则访客 IP 全是代理机地址。
+  echo "APP_TRUST_XFF=${APP_TRUST_XFF:-false}"
   echo "BIND_ADDR=0.0.0.0"
   echo "HOST_PORT=$HOST_PORT"
   echo "MEM_LIMIT=$MEM_LIMIT"

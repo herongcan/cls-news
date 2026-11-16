@@ -5,7 +5,7 @@
 一个 Spring Boot 进程 + 一个 SQLite 文件，没有别的。启动、抓取、分析、展示、接口、访客统计全部在这一个 jar 里。
 
 **当前状态：已部署在阿里云一台 2 核 ECS 上，容器 + 命名卷，推 `main` 由 GitHub Actions 自动发版。**
-线上入口是 `http://<服务器IP>:8080`（域名 `herongcan.icu` 备案被卡，见下方「部署现状」）。
+线上入口是 `https://news.herongcan.icu`（Cloudflare Tunnel，域名未备案，见下方「部署现状」）；`http://8.136.19.57:8080` 仍可直连作退路。
 
 - 要上线、排查线上问题 → [DEPLOY.md](DEPLOY.md)
 - 云主机上的备份 / 恢复 / 演练 → [deploy/cloud/README.md](deploy/cloud/README.md)
@@ -375,8 +375,9 @@ paths-ignore:
 
 | 项 | 现状 |
 |---|---|
-| 入口 | `http://8.136.19.57:8080`，未上 HTTPS |
-| 域名 | `herongcan.icu` 已买、已解析，但 **ICP 备案被卡**（备案服务码要求包年包月实例 + 剩余时长 > 3 个月，当前实例不满足），所以域名现在打不开 |
+| 入口 | `https://news.herongcan.icu`，证书由 Cloudflare 边缘签发，源站不装证书、不开 80/443 |
+| 域名 | `news.herongcan.icu` CNAME → `<tunnel-id>.cfargotunnel.com`。**未做 ICP 备案**，走 Cloudflare Tunnel 出站连接绕开拦截（详情见 [deploy/cloud/README.md](deploy/cloud/README.md) 第五节） |
+| HTTPS 的真实代价 | CF 免费版把境内流量分配到美西/欧洲 PoP（实测 `cf-ray` 落 `LAX`/`AMS`），首字节 **1.2–3 秒、偶发 10 秒+**，而 IP 直连是 69ms。解决了「有没有 HTTPS」，没解决「快不快」 |
 | 备案拦截的判定方式 | 按 **HTTP Host 头**，跟端口无关。带未备案域名走 80 拦、走 8080 一样拦，换端口绕不过去；用 IP 直连不在拦截范围 —— 这就是现在同事用 `IP:8080` 的原因 |
 | 回滚 | 没有自动回滚，`git revert` 后重新推一次 |
 | 备份 | 每日 03:30 自动 `sqlite3 .backup` + gzip，见下节 |
@@ -548,7 +549,7 @@ tools/eval/                      分析质量评估：labels.csv 人工标注 + 
 | 2 | **备份改小时级 + 加异地副本** | 现在 RPO 24 小时，且备份和原库在同一台机器上，机器挂了等于没备份 |
 | 3 | **`fulltext` 改 `false`** | 让性质从「小范围转载」退回「索引」，见上面合规那节 |
 | 4 | **补测试** | `src/test` 现在是空的。想换数据库（比如以后上 RDS PG）之前必须先有回归，否则改 SQL 全靠手点 |
-| 5 | 域名备案 | 备案服务码要包年包月实例；等下次续费或换实例时一起办，办完设 `DOMAIN_READY=1` 重新部署即可 |
+| 5 | 隧道链路太慢 | 迁香港/新加坡轻量（域名直接 A 记录 + Caddy 自动签证书），或把 ICP 备案办下来走境内直连。两者都要改 `BIND_ADDR=127.0.0.1` 并收掉安全组的 8080 |
 | 6 | 清理 `visit` 表的历史脏数据 | 79 条里有 66 个是只来过一次的扫描器 IP（旧拦截器口径留下的），要不要删需要你拍板 |
 
 采集和分析侧目前没有已知问题：`lastError` 长期为空、日增 400+ 条、CPU 1%、`load average 0.00`。

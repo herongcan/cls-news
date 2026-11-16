@@ -3,13 +3,41 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" id="themeColor" content="#0a0b0d">
 <title>财联社电报 · 实时</title>
 <link rel="icon" href="data:,">
 <style>
+  /* 配色全部收在这一层，切主题只换变量，不动任何一条规则。
+     注意 --hover-line / --hover-bg 这类「交互态」也得是变量：深色下要提亮、
+     浅色下要压暗，写死成 #3b414c 的话浅色主题里 hover 边框会比正文还重。
+     color-scheme 决定滚动条、输入框这些原生控件跟哪一边走，不写会一黑一白。 */
   :root{
+    color-scheme:dark;
     --bg:#0a0b0d; --panel:#101216; --line:#1e2128; --line-2:#2a2e37;
     --text:#e7e9ee; --muted:#868d9b; --dim:#5d646f;
     --up:#e5484d; --down:#2fa66a; --amber:#d9a441;
+    --hover-line:#3b414c; --hover-bg:rgba(255,255,255,.03);
+    --amber-weak:rgba(217,164,65,.10); --amber-line:rgba(217,164,65,.45);
+    --mark-bg:rgba(217,164,65,.22);
+    --up-line:rgba(229,72,77,.45); --down-line:rgba(47,166,106,.45);
+    --up-line-weak:rgba(229,72,77,.35); --down-line-weak:rgba(47,166,106,.35);
+    --sec-fg:#8fb8d8; --sec-bg:rgba(120,170,220,.10); --sec-line:rgba(120,170,220,.25);
+    --infer:#7f8790; --on-accent:#0a0b0d;
+  }
+  /* 浅色：微暖米白。红绿都往下压了一档 —— #e5484d / #2fa66a 直接放白底上会发虚，
+     对比度不够，十几条连读下来眼睛很累；琥珀同理，否则标签像褪色印刷。 */
+  html[data-theme="light"]{
+    color-scheme:light;
+    --bg:#faf9f6; --panel:#ffffff; --line:#e7e3da; --line-2:#d8d2c6;
+    --text:#1b1a17; --muted:#5e5b54; --dim:#8d887e;
+    --up:#c7363c; --down:#1a7f55; --amber:#9c6d18;
+    --hover-line:#c8c2b5; --hover-bg:rgba(0,0,0,.035);
+    --amber-weak:rgba(156,109,24,.12); --amber-line:rgba(156,109,24,.35);
+    --mark-bg:rgba(156,109,24,.18);
+    --up-line:rgba(199,54,60,.42); --down-line:rgba(26,127,85,.42);
+    --up-line-weak:rgba(199,54,60,.32); --down-line-weak:rgba(26,127,85,.32);
+    --sec-fg:#2f6b8f; --sec-bg:rgba(47,107,143,.07); --sec-line:rgba(47,107,143,.22);
+    --infer:#7a7568; --on-accent:#ffffff;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
@@ -35,7 +63,7 @@
   .meta b{color:var(--text);font-weight:500}
   /* 服务端没开鉴权时的显性标记。有它才不会把「登录框输什么都通过」
      误当成真在鉴权 —— 那正是这个提示存在的全部理由。 */
-  #devbadge{color:var(--amber);border:.5px solid rgba(217,164,65,.45);
+  #devbadge{color:var(--amber);border:.5px solid var(--amber-line);
             border-radius:4px;padding:1px 6px}
   #devbadge[hidden]{display:none}
   /* 只读账号的标记与顶部「退出」。没有退出入口时，换账号只能手动清 localStorage，
@@ -45,13 +73,18 @@
   #roBadge[hidden],#logout[hidden]{display:none}
   button{background:transparent;border:.5px solid var(--line-2);color:var(--muted);
          font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:inherit}
-  button:hover{border-color:#3b414c;color:var(--text)}
+  button:hover{border-color:var(--hover-line);color:var(--text)}
+  /* 主题钮：三态循环（自动 → 浅色 → 深色）。图标和文字都跟着当前档位变，
+     窄屏只留图标 —— 顶栏在 390px 上已经要换行，再加两字会挤成三行。 */
+  #theme{display:inline-flex;align-items:center;gap:5px}
+  #theme .ti{font-size:12px;line-height:1}
+  @media (max-width:640px){#theme .tl{display:none}}
   main{max-width:920px;margin:0 auto;padding:0 20px 80px}
   ul{list-style:none;margin:0;padding:0}
   li{display:grid;grid-template-columns:56px 1fr;gap:14px;
      padding:14px 0;border-bottom:.5px solid var(--line)}
   li.new{animation:flash 2.2s ease-out}
-  @keyframes flash{0%{background:rgba(217,164,65,.10)}100%{background:transparent}}
+  @keyframes flash{0%{background:var(--amber-weak)}100%{background:transparent}}
   .time{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;
         padding-top:2px;display:flex;flex-direction:column;gap:5px;align-items:flex-start}
   /* 时间两行：上行时分秒、下行日期。竖着排是为了不撑宽那 56px 的窄列，
@@ -61,14 +94,14 @@
   .time .dd.today{opacity:.9;color:var(--amber)}
   .lv{font-size:10px;line-height:1.4;text-align:center;border-radius:3px;
       padding:0 4px;width:fit-content;border:.5px solid var(--line-2);color:var(--dim)}
-  .lv.a{color:var(--amber);border-color:rgba(217,164,65,.45)}
+  .lv.a{color:var(--amber);border-color:var(--amber-line)}
   .txt{margin:0;white-space:pre-wrap;word-break:break-word}
   a.title{color:var(--text);text-decoration:none;border-bottom:.5px solid transparent}
   a.title:hover{border-bottom-color:var(--line-2)}
   /* 搜索命中高亮：半透明琥珀叠色 + color:inherit。
      不要写成深色字配黄底 —— 整页是暗色，一条条纯黄块会非常刺眼；
      color:inherit 保证链接本身的文字色不被覆盖。 */
-  .txt mark{background:rgba(217,164,65,.22);color:inherit;
+  .txt mark{background:var(--mark-bg);color:inherit;
             padding:0 1px;border-radius:2px;box-decoration-break:clone}
   /* 命中在正文、标题里没有关键词时给个说明，
      否则用户会觉得「搜出来了却一个字都没高亮，是不是坏了」 */
@@ -79,34 +112,34 @@
         border-radius:4px;padding:1px 6px;display:inline-flex;align-items:center;gap:4px;
         text-decoration:none;transition:border-color .15s,color .15s,background .15s}
   /* 只有能跳转的才给 hover 反馈，不可点的保持静态，避免误导 */
-  a.chip:hover{border-color:#3b414c;color:var(--text);background:rgba(255,255,255,.03)}
+  a.chip:hover{border-color:var(--hover-line);color:var(--text);background:var(--hover-bg)}
   .chip .code{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
   a.chip:hover .code{color:var(--muted)}
   /* min-height 用来占位：从「分析」按钮变成结论时行高不变，列表不会往下抖 */
   .ana{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;min-height:22px}
   .pill{font-size:11px;padding:1px 7px;border-radius:4px;border:.5px solid}
-  .pill.up{color:var(--up);border-color:rgba(229,72,77,.45)}
-  .pill.down{color:var(--down);border-color:rgba(47,166,106,.45)}
+  .pill.up{color:var(--up);border-color:var(--up-line)}
+  .pill.down{color:var(--down);border-color:var(--down-line)}
   .pill.flat{color:var(--muted);border-color:var(--line-2)}
   .why{font-size:12px;color:var(--muted)}
   /* 板块标签：比个股低一级，用冷色，避免和红绿的涨跌语义撞车 */
   .sec{font-size:10.5px;padding:1px 6px;border-radius:3px;margin-left:4px;
-       color:#8fb8d8;background:rgba(120,170,220,.10);border:.5px solid rgba(120,170,220,.25)}
+       color:var(--sec-fg);background:var(--sec-bg);border:.5px solid var(--sec-line)}
   /* 模型判的个股：带市场前缀 + 方向箭头，理由放 title */
   .astk{font-size:11px;padding:1px 6px;border-radius:3px;margin-left:4px;
         border:.5px solid var(--line-2);white-space:nowrap}
-  .astk.up{color:var(--up);border-color:rgba(229,72,77,.35)}
-  .astk.down{color:var(--down);border-color:rgba(47,166,106,.35)}
+  .astk.up{color:var(--up);border-color:var(--up-line-weak)}
+  .astk.down{color:var(--down);border-color:var(--down-line-weak)}
   .astk.flat{color:var(--muted)}
   .astk i{font-style:normal;opacity:.55;margin-right:3px;font-size:10px}
   /* 映射推导：故意做得比结论更轻，它说的是「怎么推出来的」，不是事实本身 */
-  .inf{font-size:11px;color:#7f8790;margin-left:6px;font-style:italic}
+  .inf{font-size:11px;color:var(--infer);margin-left:6px;font-style:italic}
   /* 分析按钮：默认低调，hover 才亮，避免整页都是按钮抢走新闻本身的注意力 */
   button.act{font-size:11px;padding:1px 8px;border-radius:4px;line-height:1.7;
              display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-  button.act:hover{background:rgba(255,255,255,.03)}
+  button.act:hover{background:var(--hover-bg)}
   button.act:disabled{opacity:.55;cursor:default;border-color:var(--line-2)}
-  button.act.err{color:var(--up);border-color:rgba(229,72,77,.4)}
+  button.act.err{color:var(--up);border-color:var(--up-line-weak)}
   .spin{width:10px;height:10px;flex:none;display:inline-block;border:1.5px solid var(--line-2);
         border-top-color:var(--muted);border-radius:50%;animation:spin .7s linear infinite}
   .note{font-size:11px;color:var(--dim)}
@@ -127,7 +160,7 @@
   /* 首屏 10 条填不满一屏时滚不动，给一个明确的可点击入口，否则用户永远看不到更早的记录 */
   #more.manual{color:var(--muted);cursor:pointer;text-decoration:underline;
                text-underline-offset:4px;text-decoration-color:var(--line-2)}
-  #more.manual:hover{color:var(--text);text-decoration-color:#3b414c}
+  #more.manual:hover{color:var(--text);text-decoration-color:var(--hover-line)}
   #sentinel{height:1px}
   /* 搜索栏单独一行，不塞进 header 的 meta 区 —— 那一块在窄屏已经换行，
      再放输入框会挤成三行。 */
@@ -158,13 +191,28 @@
   #gate input{background:var(--panel);border:.5px solid var(--line-2);border-radius:8px;
               color:var(--text);font-size:16px;line-height:1.2;padding:11px 13px;
               font-family:inherit;outline:none;-webkit-appearance:none;appearance:none}
-  #gate input:focus{border-color:#3b414c}
+  #gate input:focus{border-color:var(--hover-line)}
   #gate button{margin-top:4px;background:var(--text);border:none;border-radius:8px;
-               color:#0a0b0d;font-size:15px;font-weight:500;padding:11px;cursor:pointer}
-  #gate button:hover{color:#0a0b0d;border:none}
+               color:var(--on-accent);font-size:15px;font-weight:500;padding:11px;cursor:pointer}
+  #gate button:hover{color:var(--on-accent);border:none}
   #gate button:disabled{opacity:.55;cursor:default}
   .gate-err{color:var(--up);font-size:12px;min-height:18px;text-align:center}
 </style>
+<script>
+/* 首帧之前就把主题钉死，否则会先画一帧深色再跳成浅色，白屏闪一下很难看。
+   放在 </style> 之后、<body> 之前：走到这里 <html> 和样式表都已就绪，
+   改 dataset 会直接影响首屏绘制。
+   存的是用户选择（auto/light/dark），这里只负责把 auto 解析成系统值 ——
+   所以 CSS 里不需要再写一遍 @media (prefers-color-scheme) 的色板副本。 */
+(function () {
+  var c = '';
+  try { c = localStorage.getItem('cls.theme') || ''; } catch (e) { /* 无痕模式，忽略 */ }
+  var sysLight = false;
+  try { sysLight = !!(window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches); } catch (e) { /* 忽略 */ }
+  var t = (c === 'light' || c === 'dark') ? c : (sysLight ? 'light' : 'dark');
+  document.documentElement.dataset.theme = t;
+})();
+</script>
 </head>
 <body>
 
@@ -196,6 +244,7 @@
     <span id="anaToday">今日调用 0</span>
     <span>·</span>
     <span id="last">等待首次抓取</span>
+    <button id="theme" aria-label="切换主题" title="主题：自动（点击切换）"><span class="ti" id="themeIcon">◐</span><span class="tl" id="themeText">自动</span></button>
     <button id="refresh">立即刷新</button>
     <span id="roBadge" hidden title="当前账号为只读：不能触发分析，也看不到访客明细">只读</span>
     <button id="logout" hidden>退出</button>
@@ -246,6 +295,79 @@
   const devBadgeEl = document.getElementById('devbadge');
   const roBadgeEl = document.getElementById('roBadge');
   const logoutEl = document.getElementById('logout');
+
+  /* ---------------- 主题：自动 / 浅色 / 深色 ---------------- */
+  // 三态循环，而不是二态开关：多数时候人希望「跟着系统走」，但偶尔白天想固定浅色，
+  // 二态会在切过之后就再也回不到自动，只能去清 localStorage。
+  const THEME_KEY = 'cls.theme';
+  const THEME_ORDER = ['auto', 'light', 'dark'];
+  const THEME_META = {
+    auto:  { icon: '◐', label: '自动' },
+    light: { icon: '☀', label: '浅色' },
+    dark:  { icon: '☾', label: '深色' }
+  };
+
+  function systemTheme() {
+    try {
+      return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    } catch (_) {
+      return 'dark';
+    }
+  }
+
+  /** 用户选的是哪一档（auto / light / dark），不是最终渲染值。 */
+  function themeChoice() {
+    try {
+      const v = localStorage.getItem(THEME_KEY);
+      if (v === 'light' || v === 'dark' || v === 'auto') return v;
+    } catch (_) { /* 无痕模式读不到，按默认走 */ }
+    return 'auto';
+  }
+
+  /**
+   * @param choice  auto / light / dark
+   * @param persist 是否写回 localStorage（跟随系统自动重绘时不要写）
+   */
+  function applyTheme(choice, persist) {
+    const resolved = choice === 'auto' ? systemTheme() : choice;
+    document.documentElement.dataset.theme = resolved;
+    if (persist) {
+      try { localStorage.setItem(THEME_KEY, choice); } catch (_) { /* 忽略 */ }
+    }
+    const m = THEME_META[choice] || THEME_META.auto;
+    const iconEl = document.getElementById('themeIcon');
+    const textEl = document.getElementById('themeText');
+    const btnEl = document.getElementById('theme');
+    if (iconEl) iconEl.textContent = m.icon;
+    if (textEl) textEl.textContent = m.label;
+    if (btnEl) btnEl.title = '主题：' + m.label + '（点击切换）';
+    // 移动端浏览器地址栏跟着配色走，读实际生效的 --bg 免得两处各写一份色值
+    const meta = document.getElementById('themeColor');
+    if (meta) {
+      const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+      if (bg) meta.setAttribute('content', bg);
+    }
+  }
+
+  // 选「自动」时才跟随系统变化；手动选过就不再被系统设置覆盖
+  try {
+    const mq = matchMedia('(prefers-color-scheme: light)');
+    const onChange = function () {
+      if (themeChoice() === 'auto') applyTheme('auto', false);
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else if (mq.addListener) mq.addListener(onChange);   // 旧版 Safari
+  } catch (_) { /* 不支持就算，不阻塞渲染 */ }
+
+  const themeBtn = document.getElementById('theme');
+  if (themeBtn) {
+    themeBtn.addEventListener('click', function () {
+      const cur = themeChoice();
+      const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
+      applyTheme(next, true);
+    });
+  }
+  applyTheme(themeChoice(), false);
 
   /**
    * 当前账号能不能做写操作（触发分析）。默认 true，拿到 /api/status 的 role 后可能变 false。

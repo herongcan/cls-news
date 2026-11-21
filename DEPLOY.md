@@ -99,8 +99,8 @@ APP_AUTH=true
 APP_USER=admin
 APP_PASSWORD=换成你自己的密码
 APP_READONLY=朋友:密码
-APP_DEMO=demo:demo
-APP_DEMO_DAILY_CAP=10
+APP_GUEST=guest:guest
+APP_GUEST_DAILY_CAP=10
 BIND_ADDR=0.0.0.0
 HOST_PORT=8080
 MEM_LIMIT=512m
@@ -114,11 +114,11 @@ DEEPSEEK_API_KEY=sk-xxxx
   4M 带宽十几分钟，还容易被 OOM —— 而 `cls-news:0.1.0` 只需要一个 36MB 的 jar + JRE。
 - **`MEM_LIMIT`** 按 `free -m` 的总内存定：≤1000MB 用 `384m`（1G 机器）、≤1600MB 用 `448m`、否则 `512m`。
   写大了会被 OOM killer 反复杀，症状是「容器过一会儿就重启」。
-- **`APP_DEMO`** 是给外人试的账号：能点分析，但每天只有 `APP_DEMO_DAILY_CAP` 次，
-  且访客数据整个不可见。它的密码**公开写在登录页上**（`index.html` 的 `.gate-demo` 那行），
+- **`APP_GUEST`** 是给外人试的账号：能点分析，但每天只有 `APP_GUEST_DAILY_CAP` 次，
+  且访客数据整个不可见。它的密码**公开写在登录页上**（`index.html` 的 `.gate-guest` 那行），
   所以改账号时两处要一起改，否则来试的人会一直 401。
-  这个账号的止损线就是那个额度，设 `APP_DEMO_DAILY_CAP=0` 等于关闭演示权限。
-- **`APP_READONLY` / `APP_DEMO` / `APP_DEMO_DAILY_CAP` 三行会被 `deploy.sh` 回读沿用**，
+  这个账号的止损线就是那个额度，设 `APP_GUEST_DAILY_CAP=0` 等于关闭游客权限。
+- **`APP_READONLY` / `APP_GUEST` / `APP_GUEST_DAILY_CAP` 三行会被 `deploy.sh` 回读沿用**，
   在服务器上手动加了就不会被下次发版冲掉 —— 但别指望「只改远端不写进来」能永久生效，
   重建机器时这份就是唯一来源。
 

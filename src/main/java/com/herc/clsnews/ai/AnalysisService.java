@@ -98,9 +98,8 @@ public class AnalysisService {
     /**
      * 这个角色现在还能不能分析。
      *
-     * <p>两层上限都要判：全局 daily-cap 是「今天全站花了多少钱」的保险丝，
-     * 演示账号的小额度是「这个角色最多花几次」。前者管总量，后者管分配，缺一不可 ——
-     * 只判角色额度的话，演示账号能突破全站上限。
+     * <p>两层都要判：全局 daily-cap 管总量（花多少钱），角色额度管分配。
+     * 只判角色额度的话，游客能突破全站上限。
      *
      * @param actorCap null = 该角色没有独立额度，只受全局上限约束
      */
@@ -128,7 +127,7 @@ public class AnalysisService {
      * 已经分析过且结果新鲜（返回旧结果）、有人正在分析（BUSY）、今日配额用完（CAPPED）。
      *
      * @param force    true 时无视新鲜度强制重算，只给运维手工调用，界面不暴露
-     * @param actor    谁触发的，记账用（rw / demo / ro）。null 当 rw
+     * @param actor    谁触发的，记账用（rw / guest / ro / auto）。null 当 rw
      * @param actorCap 该角色的独立日额度，null = 只受全局 daily-cap 约束
      * @throws AnalysisException 所有可预期的失败都从这里出去，带状态码和错误码
      */
@@ -148,19 +147,17 @@ public class AnalysisService {
             return new Outcome(before, true);
         }
         if (usedToday() >= dailyCap()) {
-            // 以前这里在 Worker 里是一句静默 return，表现为「新消息永远停在待分析、日志里一个字都没有」。
-            // 手动模式下必须说出来，否则用户只会重复点，把次数白耗在上限判断上。
+            // 必须明说，否则用户只会重复点，把次数白耗在上限判断上。
             throw new AnalysisException(429, "CAPPED",
                     "今日分析已达上限 " + dailyCap() + " 条，明天再试（调整 app.analysis.daily-cap 可放宽）");
         }
         if (actorCap != null && usedToday(actor) >= actorCap) {
-            // 文案必须点明是哪个上限：演示账号看到「已达上限 300 条」只会以为是系统坏了
+            // 文案要点明是哪个上限：游客看到「已达上限 300 条」会以为是系统坏了
             throw new AnalysisException(429, "CAPPED",
-                    "演示账号今日 " + actorCap + " 次分析已用完，明天再试");
+                    "游客账号今日 " + actorCap + " 次分析已用完，明天再试");
         }
 
-        // 原子认领：两个同事同时点同一条，只有一个能拿到这行，另一个拿空 → BUSY。
-        // 等价于以前的 claimPending，只是从「扫一批」变成「抢一条」。
+        // 原子认领：两个人同时点同一条，只有一个拿到这行，另一个拿空 → BUSY。
         News claimed = store.claimOne(id).orElseThrow(
                 () -> new AnalysisException(409, "BUSY", "这条正在分析中，稍等几秒"));
 

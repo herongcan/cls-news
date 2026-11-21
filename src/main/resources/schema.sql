@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS analysis_call (
     id      INTEGER PRIMARY KEY,
     ts      INTEGER NOT NULL,                         -- epoch 秒
     news_id INTEGER,
-    actor   TEXT                                      -- rw | demo | ro；老数据为 NULL，按全站口径算
+    actor   TEXT                                      -- rw | guest | ro | auto；NULL = 加列前的老数据
 );
 
 CREATE INDEX IF NOT EXISTS idx_call_ts ON analysis_call (ts);

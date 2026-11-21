@@ -36,9 +36,8 @@ public final class UserAgent {
      * 它**故意**带 Chrome 字样，只按常规顺序判断会认成"桌面版 Chrome"。
      * 这也是为什么判 bot 必须是第一步，而不是最后兜底。
      *
-     * <p>这里刻意不写裸的 {@code "bot"}：CUBOT 手机的 UA 里就含 "CUBOT"，
-     * 一个 contains 就会把真人误判成爬虫。改成 {@code "bot/"}、{@code "bot;"}
-     * 加具名列表 —— 覆盖 "*bot/2.1" 这类通用形态，又不碰品牌名。
+     * <p>刻意不写裸的 {@code "bot"}：CUBOT 手机的 UA 里就含 "CUBOT"，contains 会把真人
+     * 误判成爬虫。用 {@code "bot/"}、{@code "bot;"} 加具名列表，覆盖 "*bot/2.1" 这类形态。
      */
     private static final String[] BOT_MARKS = {
             "bot/", "bot;", "crawler", "spider", "curl/", "wget/", "python-requests",

@@ -16,9 +16,9 @@
 #   APP_PASSWORD 访问密码，默认 admin
 #   APP_USER     访问账号，默认 admin
 #   APP_READONLY 只读账号 user:pass,user:pass2（不给就沿用远端，不会被清空）
-#   APP_DEMO     演示账号 user:pass（能分析但每天有额度上限，看不到访客数据；
+#   APP_GUEST     游客账号 user:pass（能分析但每天有额度上限，看不到访客数据；
 #                不给就沿用远端，不会被清空）
-#   APP_DEMO_DAILY_CAP 演示账号每天能分析几条，默认 10；同样沿用远端
+#   APP_GUEST_DAILY_CAP 游客账号每天能分析几条，默认 10；同样沿用远端
 #
 set -euo pipefail
 
@@ -171,19 +171,19 @@ if [[ -z "${APP_READONLY:-}" ]]; then
   fi
 fi
 
-# 演示账号与它的日额度：和只读账号同一个道理 —— 加了就是长期东西，发版不能清掉。
+# 游客账号与它的日额度：加了就是长期配置，发版不能清掉。
 # 额度单独也要沿用：调成 10 是深思熟虑的结果，被重置回默认值等于悄悄放宽了花费。
-if [[ -z "${APP_DEMO:-}" ]]; then
-  APP_DEMO="$(ssh "$HOST" "sed -n 's/^APP_DEMO=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
-  if [[ -n "$APP_DEMO" ]]; then
-    say "沿用远端已有的演示账号配置"
+if [[ -z "${APP_GUEST:-}" ]]; then
+  APP_GUEST="$(ssh "$HOST" "sed -n 's/^APP_GUEST=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  if [[ -n "$APP_GUEST" ]]; then
+    say "沿用远端已有的游客账号配置"
   fi
 fi
 
-if [[ -z "${APP_DEMO_DAILY_CAP:-}" ]]; then
-  APP_DEMO_DAILY_CAP="$(ssh "$HOST" "sed -n 's/^APP_DEMO_DAILY_CAP=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
-  if [[ -n "$APP_DEMO_DAILY_CAP" ]]; then
-    say "沿用远端已有的 APP_DEMO_DAILY_CAP=$APP_DEMO_DAILY_CAP"
+if [[ -z "${APP_GUEST_DAILY_CAP:-}" ]]; then
+  APP_GUEST_DAILY_CAP="$(ssh "$HOST" "sed -n 's/^APP_GUEST_DAILY_CAP=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  if [[ -n "$APP_GUEST_DAILY_CAP" ]]; then
+    say "沿用远端已有的 APP_GUEST_DAILY_CAP=$APP_GUEST_DAILY_CAP"
   fi
 fi
 
@@ -208,8 +208,8 @@ say "写入远端 .env"
   echo "APP_USER=$APP_USER_NAME"
   echo "APP_PASSWORD=$APP_PW"
   echo "APP_READONLY=${APP_READONLY:-}"
-  echo "APP_DEMO=${APP_DEMO:-}"
-  echo "APP_DEMO_DAILY_CAP=${APP_DEMO_DAILY_CAP:-10}"
+  echo "APP_GUEST=${APP_GUEST:-}"
+  echo "APP_GUEST_DAILY_CAP=${APP_GUEST_DAILY_CAP:-10}"
   # 默认 false：没有反向代理时信任 XFF 等于允许伪造 IP（见 ClientIp 的注释）。
   # 挂了 Tunnel / Caddy / Nginx 就必须是 true，否则访客 IP 全是代理机地址。
   echo "APP_TRUST_XFF=${APP_TRUST_XFF:-false}"

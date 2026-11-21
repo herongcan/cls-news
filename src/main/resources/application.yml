@@ -78,24 +78,19 @@ app:
     # 注意 APP_PASSWORD 显式设成空字符串**不会**回落到这个默认值，而是直接启动失败——
     # 「以为开了鉴权、其实密码是空串」比明说没开更危险。
     password: ${APP_PASSWORD:admin}
-    # 只读账号，格式 user:pass,user:pass2（逗号分隔）。只能 GET，写接口一律 403，
-    # 且看不到 /api/visits/logs 的访客明细。给朋友 / 面试演示用这个，别发主账号——
-    # 主账号能触发分析（烧 daily-cap）也能看所有人的 IP。
+    # 只读账号，格式 user:pass,user:pass2（逗号分隔）。只能 GET，写接口 403，
+    # 看不到 /api/visits/logs 的访客明细。
     read-only: ${APP_READONLY:}
-    # 演示账号，格式 user:pass（多个用逗号分隔，环境变量 APP_DEMO）。
-    # 比只读多一项：能点「分析」。比主账号少两样：每天只有 demo-daily-cap 次，
-    # 且访客数据整个不可见（连今日访客聚合数都不给）。
-    # 注意它的密码是公开写在登录页上的（本来就是给面试演示用的），
-    # 所以真正的止损线是 demo-daily-cap —— 设成 0 等于关闭演示权限。
-    demo: ${APP_DEMO:}
-    demo-daily-cap: ${APP_DEMO_DAILY_CAP:10}
+    # 游客账号，格式 user:pass（多个用逗号分隔，环境变量 APP_GUEST）。
+    # 能点「分析」，受 guest-daily-cap 约束；访客数据整个不可见。
+    # 密码公开写在登录页上，止损线就是 guest-daily-cap（0 = 关闭）。
+    guest: ${APP_GUEST:}
+    guest-daily-cap: ${APP_GUEST_DAILY_CAP:10}
     permit-paths:
       - /healthz
     # 是否信任 X-Forwarded-For / X-Real-IP。
-    # false（默认）：只用 TCP 对端地址。这两个头客户端能随便伪造，
-    #   现在没有反向代理，信它等于让人往访客表里写任意 IP。
-    # true：挂上 Caddy / Nginx / CDN 之后必须打开，
-    #   否则 remoteAddr 全是代理机地址，所有访客被算成一个人。
+    # false：只用 TCP 对端地址，防止客户端伪造。
+    # 前面有反向代理 / 隧道时必须 true，否则所有访客算成同一个 IP。
     trust-forwarded-headers: ${APP_TRUST_XFF:false}
 
 logging:

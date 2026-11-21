@@ -53,42 +53,29 @@ public class AppProps {
         /**
          * 只读账号，格式 {@code user:pass,user2:pass2}（环境变量 {@code APP_READONLY}）。
          *
-         * <p>为什么要有它：{@link #username}/{@link #password} 那一个账号是<b>可写</b>的，
-         * 能触发分析（烧 daily-cap 配额）、能读 /api/visits/logs（含所有人的 IP）。
-         * 把这样一个账号发给朋友或面试官，等于把运维权限一起给了。
+         * <p>只能 GET/HEAD/OPTIONS，外加 {@code POST /api/visit/ping}（无副作用的访客上报）。
+         * 看得到访客聚合数，看不到 {@code /api/visits/logs} 的明细。
          *
-         * <p>只读账号只能发 GET/HEAD/OPTIONS，外加一个例外 POST /api/visit/ping
-         * （访客上报，本身就是无副作用的统计）。写接口一律 403。
-         *
-         * <p>用 String 而不是 String[] 接：空字符串绑定到数组在 Spring 里行为不稳定，
-         * 这里自己 split 反而不会踩边界。
+         * <p>用 String 而不是 String[] 接：空字符串绑定到数组在 Spring 里行为不稳定。
          */
         private String readOnly = "";
         /**
-         * 演示账号，格式 {@code user:pass,user2:pass2}（环境变量 {@code APP_DEMO}）。
+         * 游客账号，格式 {@code user:pass,user2:pass2}（环境变量 {@code APP_GUEST}）。
          *
-         * <p>为什么还要第三档：只读账号能看数据但点不了「分析」，而这个功能最有说服力的
-         * 部分恰恰是点一下看模型给的结论。可写账号又不能给 —— 它能看所有人的 IP，
-         * 还能把 daily-cap 烧光。所以单独一档：能分析，但额度按天封死，且访客模块整个不可见。
-         *
-         * <p>演示账号的密码是公开的（页面登录框里直接写着），任何人拿到地址都能用掉那几次额度。
-         * 这个代价是明码标价的：{@link #demoDailyCap} 就是止损线，设成 0 等于关闭演示权限。
+         * <p>比只读多一项「分析」，比主账号少访客数据和写接口。密码公开写在登录页上，
+         * 所以 {@link #guestDailyCap} 是唯一的止损线，设成 0 等于关闭游客权限。
          */
-        private String demo = "";
-        /**
-         * 演示账号每天能分析几条。按<b>角色</b>汇总，不是按账号：
-         * 演示额度是一笔固定预算池，多开一个演示账号不该让它翻倍。
-         */
-        private int demoDailyCap = 10;
+        private String guest = "";
+        /** 游客账号每天能分析几条。按角色汇总，多开几个游客账号不会让额度翻倍。 */
+        private int guestDailyCap = 10;
         /**
          * 是否信任 X-Forwarded-For / X-Real-IP。
          *
-         * <p>默认 false，只用 {@code getRemoteAddr()}。因为这两个头是客户端随便写的：
-         * 现在没有反向代理，任何人不带密码就能用
-         * {@code curl -H "X-Forwarded-For: 8.8.8.8" ...} 往访客表里塞一个假 IP。
+         * <p>默认 false，只用 {@code getRemoteAddr()}：这两个头客户端能随便伪造，
+         * 不带密码就能往访客表里塞假 IP。
          *
-         * <p>挂上 Caddy/Nginx 之后必须改成 true —— 那时 remoteAddr 会变成代理机地址，
-         * 所有访客被算成一个人，而且不会报错，只是数字永远不动。
+         * <p>前面挂了反向代理或隧道时必须打开，否则 remoteAddr 全是代理机地址，
+         * 所有访客被算成同一个人——不报错，只是数字永远不动。
          */
         private boolean trustForwardedHeaders = false;
 
@@ -102,10 +89,10 @@ public class AppProps {
         public void setPermitPaths(String[] permitPaths) { this.permitPaths = permitPaths; }
         public String getReadOnly() { return readOnly; }
         public void setReadOnly(String readOnly) { this.readOnly = readOnly; }
-        public String getDemo() { return demo; }
-        public void setDemo(String demo) { this.demo = demo; }
-        public int getDemoDailyCap() { return demoDailyCap; }
-        public void setDemoDailyCap(int demoDailyCap) { this.demoDailyCap = demoDailyCap; }
+        public String getGuest() { return guest; }
+        public void setGuest(String guest) { this.guest = guest; }
+        public int getGuestDailyCap() { return guestDailyCap; }
+        public void setGuestDailyCap(int guestDailyCap) { this.guestDailyCap = guestDailyCap; }
         public boolean isTrustForwardedHeaders() { return trustForwardedHeaders; }
         public void setTrustForwardedHeaders(boolean v) { this.trustForwardedHeaders = v; }
     }

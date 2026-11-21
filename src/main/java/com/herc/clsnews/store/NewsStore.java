@@ -40,8 +40,7 @@ public class NewsStore {
      * 而 SQLite 的 ALTER TABLE 没有 {@code ADD COLUMN IF NOT EXISTS}，重复执行会直接抛错。
      * 所以只能先问 PRAGMA 再决定要不要加 —— 新装的库走 schema.sql 时就已经有这列，查完就跳过。
      *
-     * <p>老数据留着 NULL：那是加这列之前的调用，本来就分不清是谁触发的，
-     * 按「全站口径」统计才诚实（当 demo 的用量算进去会白白吃掉他的 10 次）。
+     * <p>老数据留 NULL：分不清是谁触发的，只能按全站口径统计。
      */
     private void addActorColumnIfMissing() {
         List<Map<String, Object>> cols = jdbc.queryForList("PRAGMA table_info(analysis_call)");
@@ -187,8 +186,8 @@ public class NewsStore {
     /**
      * 记一次真实的大模型调用。日配额按这个数算，因为它才是钱。
      *
-     * @param actor 谁触发的（rw / demo / ro）。按角色记而不是按 IP 或用户名：
-     *              演示账号是一笔固定的预算池，池子用完就停，多开一个演示账号不该翻倍。
+     * @param actor 谁触发的（rw / guest / ro / auto）。按角色记而不是按用户名：
+     *              游客额度是一笔固定预算池，多开一个账号不该翻倍。
      */
     public void recordCall(long newsId, String actor) {
         jdbc.update("INSERT INTO analysis_call (ts, news_id, actor) VALUES (?,?,?)",

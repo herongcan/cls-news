@@ -5,19 +5,11 @@ import jakarta.servlet.http.HttpServletRequest;
 /**
  * 取真实客户端 IP。
  *
- * <p>默认只看 {@code getRemoteAddr()}，不读 X-Forwarded-For。这是一个刻意的收紧：
+ * <p>默认只看 {@code getRemoteAddr()}，不读 X-Forwarded-For：XFF 客户端可以任意写，
+ * 没挂代理时会被人用一行 curl 往访客表里塞假 IP。前面有代理或隧道时，
+ * 用 {@code app.security.trust-forwarded-headers} 显式打开。
  *
- * <p>之前的实现优先读 XFF，注释里的理由是「以后挂代理时 remoteAddr 会变成代理机地址」。
- * 方向是对的，但代价被忽略了 —— XFF 是客户端可以任意写的请求头。在没有任何反向代理的
- * 现状下，随便一句
- *
- * <pre>{@code curl -H "X-Forwarded-For: 8.8.8.8" http://IP:8080/api/visit/ping}</pre>
- *
- * <p>就能往访客表里塞一个不存在的 IP。所以改成「默认不信，挂了代理再显式打开」，
- * 由 {@code app.security.trust-forwarded-headers} 控制。
- *
- * <p>容器部署时源地址是保留的（Docker 的 DNAT 在 PREROUTING 改写目的地址，源地址不变），
- * 所以 remoteAddr 在 compose 下直接可用，不需要额外配置。
+ * <p>容器部署时源地址是保留的（Docker DNAT 只改目的地址），compose 下 remoteAddr 直接可用。
  */
 public final class ClientIp {
 

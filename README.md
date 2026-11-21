@@ -92,7 +92,7 @@ docker compose up -d                  # 默认只绑 127.0.0.1，端口 HOST_POR
 | GET | `/api/status` | 抓取状态、总数、分析进度与 token 用量、上次错误、`analysisReady`、当前账号的 `role`（`rw` / `ro`） |
 | POST | `/api/visit/ping` | 前端每次进页面调一次，记访客（聚合 + 明细） |
 | GET | `/api/visits` | 访客聚合：今日/累计人数、按 vid 去重的今日人数、设备与小时分布、近 N 天 |
-| GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv`。**演示账号与只读账号访问返回 403** |
+| GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv`。**游客与只读账号访问返回 403** |
 
 `/api/news` 的响应里带 `stats`，页面只发一个请求就能同时更新列表和状态栏。
 页面每 30 秒拉一次增量（`limit=200`，不分页），首屏和翻页各取 10 条。
@@ -153,27 +153,24 @@ APP_AUTH=true APP_USER=admin APP_PASSWORD='你的密码' java -jar target/cls-ne
 代价要说清楚：`index.html` 本身谁都能拿到（一个空壳，只有标题和样式），数据全在 `/api/**` 后面。
 另外 401 **只对非 `/api/` 请求**发 `WWW-Authenticate`，否则 Safari 会在页内登录层上面再弹一个原生框、输完还关不掉。
 
-### 三档角色：可写 / 演示 / 只读
+### 三档角色：可写 / 游客 / 只读
 
-主账号是**可写**的 —— 能触发分析（烧 `daily-cap` 配额）、能读 `/api/visits/logs`（里面是每个人的 IP 和设备）。
-把这样一个账号发给朋友或面试官，等于把运维权限一起发出去。
-
-但「只读」对演示场景又不够用：这个工具最有说服力的地方就是点一下看模型怎么判。
-两个诉求打架，所以拆成三档 —— 演示账号能分析，但额度按天封死，访客数据整个看不见：
+主账号是**可写**的——能触发分析（烧 `daily-cap`）、能读 `/api/visits/logs`（含每个人的 IP），
+所以不能直接发给别人。另外两档是给外人用的：
 
 ```bash
 APP_AUTH=true APP_USER=admin APP_PASSWORD='主密码' \
 APP_READONLY='friend:给朋友的密码' \
-APP_DEMO='demo:demo' APP_DEMO_DAILY_CAP=10 \
+APP_GUEST='guest:guest' APP_GUEST_DAILY_CAP=10 \
 java -jar target/cls-news-0.1.0.jar
 ```
 
-| 能力 | 可写 `rw` | 演示 `demo` | 只读 `ro` |
+| 能力 | 可写 `rw` | 游客 `guest` | 只读 `ro` |
 |---|---|---|---|
 | `GET` 列表 / 搜索 / 单条 / 状态 | ✅ | ✅ | ✅ |
 | `GET /api/visits`（聚合访客数、设备分布） | ✅ | ❌ 403 | ✅ |
 | `GET /api/visits/logs`（明细，含 IP / UA） | ✅ | ❌ 403 | ❌ 403 |
-| `POST /api/news/{id}/analyze` | ✅ 受 `daily-cap` | ✅ 另受 `demo-daily-cap` | ❌ 403 |
+| `POST /api/news/{id}/analyze` | ✅ 受 `daily-cap` | ✅ 另受 `guest-daily-cap` | ❌ 403 |
 | `POST /api/news/{id}/analyze?force=true`（无视新鲜度重算） | ✅ | ❌ 403 | ❌ 403 |
 | `POST /api/analysis/retry-failed` | ✅ | ❌ 403 | ❌ 403 |
 | `POST /api/visit/ping`（访客上报，无副作用） | ✅ | ✅ | ✅ |
@@ -182,30 +179,25 @@ java -jar target/cls-news-0.1.0.jar
 
 | 选择 | 原因 |
 |---|---|
-| 角色判定在 **Filter 里**，不在每个 Controller 上 | 新增接口时不会因为忘了加注解而漏；默认就是「非 GET 一律挡」 |
-| 演示账号允许 `POST .../analyze` | 演示的核心就是点那一下；只读账号看不到结论，等于让人看一份静态截图 |
-| 演示账号拒绝 `force=true` | 它绕过「结果还新鲜」的保护重算，一模一样的问题再问一遍，答案不变但钱真花了 |
-| 演示账号连 `/api/visits` 聚合也拒 | 演示要看的是模型怎么判，「站上今天多少人在用」是站主的运营数据，跟演示无关 |
-| 拦截 `/api/visits/logs` 而**不拦** `/api/visits`（只读） | 聚合数字给朋友看没有害处；明细里有具体 IP，是另一回事 |
+| 角色判定在 **Filter 里**，不在每个 Controller 上 | 新增接口不会因为漏注解而失效，默认「非 GET 一律挡」 |
+| 游客允许 `POST .../analyze`，拒绝 `force=true` | 游客就是来点那一下看结论的；`force` 是改完 prompt 后重算用的，点一次就重复烧一次钱 |
+| 游客连 `/api/visits` 聚合也拒 | 站上有多少人在用是运营数据，跟演示无关 |
+| 只读拦 `/api/visits/logs` 但不拦 `/api/visits` | 聚合数无害，明细里有具体 IP |
 
-**配额是两层，缺一不可**：全局 `daily-cap` 是「今天全站花了多少钱」的保险丝，
-`demo-daily-cap` 是「这个角色最多花几次」。只判角色额度的话，演示账号能突破全站上限。
+**配额是两层**：全局 `daily-cap` 管今天全站花多少钱，`guest-daily-cap` 管这个角色最多花几次。
+只判角色额度的话，游客能突破全站上限。调用记录按 `actor`（`rw` / `guest` / `ro` / `auto`）落库，
+后台自动分析记 `auto` 不吃游客额度；额度按**角色**汇总，多开几个游客账号不会翻倍。
+老库的 `analysis_call` 缺 `actor` 列时启动会自动 `ALTER TABLE`，历史记录按全站口径算。
 
-调用记录按 `actor`（`rw` / `demo` / `ro` / `auto`）落库，所以重启和多实例都准，
-后台自动分析记成 `auto`、不会吃掉演示账号那 10 次。演示额度按**角色**汇总而不是按账号：
-它是一笔固定预算，多开一个演示账号不该让额度翻倍。
-老库的 `analysis_call` 没有 `actor` 列，启动时会自动 `ALTER TABLE` 补上，历史记录按全站口径算。
+**游客密码是故意公开写在登录页上的**（`index.html` 的 `.gate-guest`），藏起来等于没人能试，
+所以止损线就是那个额度：`APP_GUEST_DAILY_CAP=0` 等于关闭游客权限。
+改账号时记得同步改页面文案，两处不一致会让来试的人一直 401。
 
-**演示账号的密码是故意公开写在登录页上的**（`index.html` 的 `.gate-demo`）——
-藏起来等于没人能试。所以真正的止损线是那个额度：`APP_DEMO_DAILY_CAP=0` 等于关闭演示权限。
-改账号时记得同步改页面那段文案，两处不一致会让来试的人一直 401。
+前端配合：游客登录后顶栏收起访客统计（连分隔点）、挂「游客」标记、分析按钮照常渲染，
+额度用完时行内显示服务端的 429 文案且**不给「重试」按钮**；只读则是「只读」标记 + 无分析按钮。
+这些都只是界面层，真正的拦截在服务端。
 
-前端也会跟着收：演示账号登录后顶栏把访客统计整段收起（连分隔点一起）、挂一个「演示」标记、
-分析按钮照常渲染；额度用完时行内直接显示服务端的 429 文案，**不给「重试」按钮**
-（点了还是同一个 429，白费力气还像坏了）。只读账号则是「只读」标记 + 不渲染分析按钮。
-但这些**都只是界面层**，真正的拦截在服务端 —— 隐藏按钮的理由是「别让人点了才发现不行」，不是安全边界。
-
-格式写错（比如少了冒号）或用户名与主账号重名时会**打 warn 并跳过**，不会静默生效：
+格式写错（少了冒号）或用户名与已有账号重名时会**打 warn 并跳过**，不会静默生效——
 发出去的账号一直 401 却查不出原因，比启动失败更难排查。
 
 ### 登录框只在「服务端真的在鉴权」时才出现
@@ -263,8 +255,8 @@ curl -u 1:1 localhost:8080/api/status    # 期望 401
 | `app.security.enabled` | `false` | 环境变量 `APP_AUTH`。放公网必须 `true` |
 | `app.security.username` / `password` | `admin` / `admin` | 环境变量 `APP_USER` / `APP_PASSWORD`。**公网部署必须用 `APP_PASSWORD` 覆盖掉这个默认值**；密码设成空串 + 开启鉴权 = 启动失败 |
 | `app.security.read-only` | 空 | 环境变量 `APP_READONLY`，格式 `user:pass,user2:pass2`。只能 GET，写接口 403，看不到访客明细。发这个给朋友 / 面试官，别发主账号 |
-| `app.security.demo` | 空 | 环境变量 `APP_DEMO`，格式同上。能点分析（额外受 `demo-daily-cap` 约束），但访客数据整个不可见。密码公开写在登录页上 |
-| `app.security.demo-daily-cap` | `10` | 环境变量 `APP_DEMO_DAILY_CAP`。演示账号每天能分析几条，按角色汇总；设 `0` 等于关闭演示权限 |
+| `app.security.guest` | 空 | 环境变量 `APP_GUEST`，格式同上。能点分析（受 `guest-daily-cap` 约束），访客数据整个不可见。密码公开写在登录页上 |
+| `app.security.guest-daily-cap` | `10` | 环境变量 `APP_GUEST_DAILY_CAP`。游客每天能分析几条，按角色汇总；设 `0` 等于关闭游客权限 |
 | `app.security.trust-forwarded-headers` | `false` | 环境变量 `APP_TRUST_XFF`。挂反向代理时才开 |
 | `spring.datasource.url` | `./data/news.db` | 环境变量 `DB_PATH`。容器里指向挂载卷 `/app/data/news.db` |
 

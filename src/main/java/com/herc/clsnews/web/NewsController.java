@@ -103,11 +103,10 @@ public class NewsController {
 
     /**
      * 关键词搜索。参数与返回结构刻意和 {@code /api/news} 对齐（items / hasMore / maxId），
-     * 前端才能复用同一套渲染和翻页代码，不用为搜索结果单写一份列表逻辑。
+     * 前端复用同一套渲染和翻页代码。
      *
-     * <p>路径写 {@code /news/search} 不会被 {@code /news/{id}} 抢走：Spring 的路径匹配
-     * 里字面量优先级高于模板变量。之前 {@code /api/news/visits} 之所以落到 {@code {id}} 上，
-     * 是因为那个路径压根不存在，跟这里的匹配顺序是两回事。
+     * <p>{@code /news/search} 不会被 {@code /news/{id}} 抢走：Spring 路径匹配里字面量
+     * 优先级高于模板变量。
      */
     @GetMapping("/news/search")
     public Map<String, Object> search(@RequestParam(name = "q", required = false) String q,
@@ -417,9 +416,9 @@ public class NewsController {
         return r == null ? BasicAuthFilter.ROLE_RW : String.valueOf(r);
     }
 
-    /** 演示账号有独立的日额度；其余角色共用全局 daily-cap。null = 无独立上限。 */
+    /** 游客有独立日额度；其余角色共用全局 daily-cap。null = 无独立上限。 */
     private Integer capOf(String role) {
-        return BasicAuthFilter.ROLE_DEMO.equals(role) ? props.getSecurity().getDemoDailyCap() : null;
+        return BasicAuthFilter.ROLE_GUEST.equals(role) ? props.getSecurity().getGuestDailyCap() : null;
     }
 
     /** 展示用的上限数字。无独立上限时要落到全局值，不能把 null 丢给前端。 */
@@ -428,23 +427,17 @@ public class NewsController {
         return c == null ? analysis.dailyCap() : c;
     }
 
-    /**
-     * 查用量时按谁的口径：演示账号看自己那本账，其他人看全站。
-     *
-     * <p>主账号必须看全站 —— daily-cap 是钱包的保险丝，只统计自己那一份的话，
-     * 演示账号和后台自动分析花掉的次数都不会出现在这个数字里。
-     */
+    /** 查用量的口径：游客看自己那本账，其他人看全站（daily-cap 是钱包保险丝）。 */
     private String quotaActor(String role) {
-        return BasicAuthFilter.ROLE_DEMO.equals(role) ? role : null;
+        return BasicAuthFilter.ROLE_GUEST.equals(role) ? role : null;
     }
 
     private Map<String, Object> stats(String role) {
         Map<String, Object> s = new LinkedHashMap<>();
         s.put("total", store.count());
         s.put("pending", store.countByStatus("pending"));
-        // 访客数字只给主账号和只读账号。演示账号连聚合数都看不到 ——
-        // 他要看的是「这条新闻模型怎么判」，站上有多少人在用跟他无关。
-        if (!BasicAuthFilter.ROLE_DEMO.equals(role)) {
+        // 访客数字只给 rw / ro；游客连聚合数都不给。
+        if (!BasicAuthFilter.ROLE_GUEST.equals(role)) {
             // 访客按 IP + 自然日去重：今日 = 今天来过的不同 IP 数，总 = 历史累计的不同 IP 数
             String today = LocalDate.now(ZoneId.systemDefault()).toString();
             s.put("visitToday", visits.countToday(today));
@@ -464,7 +457,7 @@ public class NewsController {
         s.put("analysisProvider", analysis.modelName());
         // 部署后第一眼看这个：false 说明 key 没配好，点击分析会全失败，但采集是正常的
         s.put("analysisReady", analysis.ready());
-        // 配额按角色给：演示账号只该看到自己那 10 次，看到全站的 300 会以为额度还很宽
+        // 配额按角色给：游客只看自己那 10 次，看到全站的 300 会以为额度很宽
         s.put("analyzedToday", analysis.usedToday(quotaActor(role)));
         s.put("analysisCap", capFor(role));
         s.put("analysisCapped", analysis.capped(quotaActor(role), capOf(role)));

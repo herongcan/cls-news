@@ -15,6 +15,10 @@
 #               但 IP 直连非标端口不受影响，省掉整个备案流程。
 #   APP_PASSWORD 访问密码，默认 admin
 #   APP_USER     访问账号，默认 admin
+#   APP_READONLY 只读账号 user:pass,user:pass2（不给就沿用远端，不会被清空）
+#   APP_DEMO     演示账号 user:pass（能分析但每天有额度上限，看不到访客数据；
+#                不给就沿用远端，不会被清空）
+#   APP_DEMO_DAILY_CAP 演示账号每天能分析几条，默认 10；同样沿用远端
 #
 set -euo pipefail
 
@@ -167,6 +171,22 @@ if [[ -z "${APP_READONLY:-}" ]]; then
   fi
 fi
 
+# 演示账号与它的日额度：和只读账号同一个道理 —— 加了就是长期东西，发版不能清掉。
+# 额度单独也要沿用：调成 10 是深思熟虑的结果，被重置回默认值等于悄悄放宽了花费。
+if [[ -z "${APP_DEMO:-}" ]]; then
+  APP_DEMO="$(ssh "$HOST" "sed -n 's/^APP_DEMO=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  if [[ -n "$APP_DEMO" ]]; then
+    say "沿用远端已有的演示账号配置"
+  fi
+fi
+
+if [[ -z "${APP_DEMO_DAILY_CAP:-}" ]]; then
+  APP_DEMO_DAILY_CAP="$(ssh "$HOST" "sed -n 's/^APP_DEMO_DAILY_CAP=//p' $REMOTE_ENV 2>/dev/null | head -1" || true)"
+  if [[ -n "$APP_DEMO_DAILY_CAP" ]]; then
+    say "沿用远端已有的 APP_DEMO_DAILY_CAP=$APP_DEMO_DAILY_CAP"
+  fi
+fi
+
 # 反向代理信任：**必须沿用远端值**。
 # 2026-11-16 起前台是 Cloudflare Tunnel，cloudflared 在 X-Forwarded-For 里写真实
 # 客户端 IP，靠 APP_TRUST_XFF=true 才取得到。这一行如果被重写成 false，访客会全部
@@ -188,6 +208,8 @@ say "写入远端 .env"
   echo "APP_USER=$APP_USER_NAME"
   echo "APP_PASSWORD=$APP_PW"
   echo "APP_READONLY=${APP_READONLY:-}"
+  echo "APP_DEMO=${APP_DEMO:-}"
+  echo "APP_DEMO_DAILY_CAP=${APP_DEMO_DAILY_CAP:-10}"
   # 默认 false：没有反向代理时信任 XFF 等于允许伪造 IP（见 ClientIp 的注释）。
   # 挂了 Tunnel / Caddy / Nginx 就必须是 true，否则访客 IP 全是代理机地址。
   echo "APP_TRUST_XFF=${APP_TRUST_XFF:-false}"

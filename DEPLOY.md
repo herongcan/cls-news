@@ -90,7 +90,7 @@ rsync -az --exclude '.git' --exclude '.idea' --exclude '.env' \
 
 `.env` 必须排除在 rsync 之外 —— 里面是密码和 key，`--delete` 会把它删掉。
 
-### 3. 写 `.env`（线上就是这 10 行）
+### 3. 写 `.env`（线上就是这些行）
 
 ```ini
 TZ=Asia/Shanghai
@@ -98,6 +98,9 @@ DB_PATH=/app/data/news.db
 APP_AUTH=true
 APP_USER=admin
 APP_PASSWORD=换成你自己的密码
+APP_READONLY=朋友:密码
+APP_DEMO=demo:demo
+APP_DEMO_DAILY_CAP=10
 BIND_ADDR=0.0.0.0
 HOST_PORT=8080
 MEM_LIMIT=512m
@@ -105,12 +108,19 @@ DOCKERFILE=deploy/cloud/Dockerfile.runtime
 DEEPSEEK_API_KEY=sk-xxxx
 ```
 
-`chmod 600 .env`。两个最容易错的：
+`chmod 600 .env`。几个最容易错的：
 
 - **`DOCKERFILE` 不写**就回落到根目录的多阶段 Dockerfile，远端要现拉 500MB 的 maven 镜像，
   4M 带宽十几分钟，还容易被 OOM —— 而 `cls-news:0.1.0` 只需要一个 36MB 的 jar + JRE。
 - **`MEM_LIMIT`** 按 `free -m` 的总内存定：≤1000MB 用 `384m`（1G 机器）、≤1600MB 用 `448m`、否则 `512m`。
   写大了会被 OOM killer 反复杀，症状是「容器过一会儿就重启」。
+- **`APP_DEMO`** 是给外人试的账号：能点分析，但每天只有 `APP_DEMO_DAILY_CAP` 次，
+  且访客数据整个不可见。它的密码**公开写在登录页上**（`index.html` 的 `.gate-demo` 那行），
+  所以改账号时两处要一起改，否则来试的人会一直 401。
+  这个账号的止损线就是那个额度，设 `APP_DEMO_DAILY_CAP=0` 等于关闭演示权限。
+- **`APP_READONLY` / `APP_DEMO` / `APP_DEMO_DAILY_CAP` 三行会被 `deploy.sh` 回读沿用**，
+  在服务器上手动加了就不会被下次发版冲掉 —— 但别指望「只改远端不写进来」能永久生效，
+  重建机器时这份就是唯一来源。
 
 > 不要留空 `APP_PASSWORD`。开了鉴权但密码为空时进程会**直接退出**，这是故意的：
 > 「以为开了鉴权」比「明说没开」危险得多。

@@ -29,7 +29,8 @@ CREATE INDEX IF NOT EXISTS idx_news_status  ON news (analysis_status);
 CREATE TABLE IF NOT EXISTS analysis_call (
     id      INTEGER PRIMARY KEY,
     ts      INTEGER NOT NULL,                         -- epoch 秒
-    news_id INTEGER
+    news_id INTEGER,
+    actor   TEXT                                      -- rw | demo | ro；老数据为 NULL，按全站口径算
 );
 
 CREATE INDEX IF NOT EXISTS idx_call_ts ON analysis_call (ts);

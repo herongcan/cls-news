@@ -81,8 +81,9 @@ public class AnalysisWorker {
         for (int i = 0; i < batch.size(); i++) {
             News n = batch.get(i);
             try {
-                // 和手动链路共用同一本账，否则 auto 模式跑的量在 /api/status 里看不见
-                store.recordCall(n.id());
+                // 和手动链路共用同一本账，否则 auto 模式跑的量在 /api/status 里看不见。
+                // actor 记 auto：后台跑的不该算到演示账号那 10 次额度上。
+                store.recordCall(n.id(), "auto");
                 AnalysisResult r = analyzer.analyze(n);
                 store.saveAnalysis(n.id(), mapper.writeValueAsString(r), r.model());
                 failedInRow = 0;

@@ -2,6 +2,8 @@ package com.herc.clsnews.store;
 
 import com.herc.clsnews.model.News;
 import com.herc.clsnews.model.RawItem;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -10,6 +12,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -21,10 +24,32 @@ public class NewsStore {
 
     private static final RowMapper<News> MAP = NewsStore::map;
 
+    private static final Logger log = LoggerFactory.getLogger(NewsStore.class);
+
     private final JdbcTemplate jdbc;
 
     public NewsStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        addActorColumnIfMissing();
+    }
+
+    /**
+     * 给老库的 {@code analysis_call} 补 {@code actor} 列。
+     *
+     * <p>schema.sql 用的是 {@code CREATE TABLE IF NOT EXISTS}，对已经存在的表一个字都不会改；
+     * 而 SQLite 的 ALTER TABLE 没有 {@code ADD COLUMN IF NOT EXISTS}，重复执行会直接抛错。
+     * 所以只能先问 PRAGMA 再决定要不要加 —— 新装的库走 schema.sql 时就已经有这列，查完就跳过。
+     *
+     * <p>老数据留着 NULL：那是加这列之前的调用，本来就分不清是谁触发的，
+     * 按「全站口径」统计才诚实（当 demo 的用量算进去会白白吃掉他的 10 次）。
+     */
+    private void addActorColumnIfMissing() {
+        List<Map<String, Object>> cols = jdbc.queryForList("PRAGMA table_info(analysis_call)");
+        boolean has = cols.stream().anyMatch(c -> "actor".equals(String.valueOf(c.get("name"))));
+        if (!has) {
+            jdbc.execute("ALTER TABLE analysis_call ADD COLUMN actor TEXT");
+            log.info("analysis_call 已补上 actor 列，历史记录按全站口径统计");
+        }
     }
 
     /** 靠 item_id 唯一约束去重。返回 1 = 新插入，0 = 已存在。 */
@@ -159,17 +184,34 @@ public class NewsStore {
                 """, MAP, id).stream().findFirst();
     }
 
-    /** 记一次真实的大模型调用。日配额按这个数算，因为它才是钱。 */
-    public void recordCall(long newsId) {
-        jdbc.update("INSERT INTO analysis_call (ts, news_id) VALUES (?,?)",
-                Instant.now().getEpochSecond(), newsId);
+    /**
+     * 记一次真实的大模型调用。日配额按这个数算，因为它才是钱。
+     *
+     * @param actor 谁触发的（rw / demo / ro）。按角色记而不是按 IP 或用户名：
+     *              演示账号是一笔固定的预算池，池子用完就停，多开一个演示账号不该翻倍。
+     */
+    public void recordCall(long newsId, String actor) {
+        jdbc.update("INSERT INTO analysis_call (ts, news_id, actor) VALUES (?,?,?)",
+                Instant.now().getEpochSecond(), newsId, actor);
     }
 
-    /** 今天已经调用过多少次模型。跨重启准确，多实例共享同一份计数。 */
-    public long countCallsSince(long epochSecond) {
-        Long n = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM analysis_call WHERE ts >= ?", Long.class, epochSecond);
+    /**
+     * 今天已经调用过多少次模型。跨重启准确，多实例共享同一份计数。
+     *
+     * @param actor null = 全站总次数（主账号看到的数字）；非 null = 只数这个角色花的
+     */
+    public long countCallsSince(long epochSecond, String actor) {
+        Long n = actor == null
+                ? jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM analysis_call WHERE ts >= ?", Long.class, epochSecond)
+                : jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM analysis_call WHERE ts >= ? AND actor = ?",
+                        Long.class, epochSecond, actor);
         return n == null ? 0 : n;
+    }
+
+    public long countCallsSince(long epochSecond) {
+        return countCallsSince(epochSecond, null);
     }
 
     /** 清掉老的调用记录，避免这张表无限长。启动时跑一次就够。 */

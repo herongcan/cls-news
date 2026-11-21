@@ -65,6 +65,22 @@ public class AppProps {
          */
         private String readOnly = "";
         /**
+         * 演示账号，格式 {@code user:pass,user2:pass2}（环境变量 {@code APP_DEMO}）。
+         *
+         * <p>为什么还要第三档：只读账号能看数据但点不了「分析」，而这个功能最有说服力的
+         * 部分恰恰是点一下看模型给的结论。可写账号又不能给 —— 它能看所有人的 IP，
+         * 还能把 daily-cap 烧光。所以单独一档：能分析，但额度按天封死，且访客模块整个不可见。
+         *
+         * <p>演示账号的密码是公开的（页面登录框里直接写着），任何人拿到地址都能用掉那几次额度。
+         * 这个代价是明码标价的：{@link #demoDailyCap} 就是止损线，设成 0 等于关闭演示权限。
+         */
+        private String demo = "";
+        /**
+         * 演示账号每天能分析几条。按<b>角色</b>汇总，不是按账号：
+         * 演示额度是一笔固定预算池，多开一个演示账号不该让它翻倍。
+         */
+        private int demoDailyCap = 10;
+        /**
          * 是否信任 X-Forwarded-For / X-Real-IP。
          *
          * <p>默认 false，只用 {@code getRemoteAddr()}。因为这两个头是客户端随便写的：
@@ -86,6 +102,10 @@ public class AppProps {
         public void setPermitPaths(String[] permitPaths) { this.permitPaths = permitPaths; }
         public String getReadOnly() { return readOnly; }
         public void setReadOnly(String readOnly) { this.readOnly = readOnly; }
+        public String getDemo() { return demo; }
+        public void setDemo(String demo) { this.demo = demo; }
+        public int getDemoDailyCap() { return demoDailyCap; }
+        public void setDemoDailyCap(int demoDailyCap) { this.demoDailyCap = demoDailyCap; }
         public boolean isTrustForwardedHeaders() { return trustForwardedHeaders; }
         public void setTrustForwardedHeaders(boolean v) { this.trustForwardedHeaders = v; }
     }

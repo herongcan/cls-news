@@ -75,10 +75,16 @@ public class AnalysisService {
      * <p>为什么按调用次数算配额：失败重试和运维手工重算会让同一行被调用多次，
      * 按「已分析的行数」计永远撞不到上限，而每次都是真金白银的一次请求。
      * 查表而不是内存计数器，重启和多实例都准。
+     *
+     * @param actor null = 全站总次数（主账号看到的数字）；非 null = 只数这个角色花的
      */
-    public long usedToday() {
+    public long usedToday(String actor) {
         long startOfDay = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toEpochSecond();
-        return store.countCallsSince(startOfDay);
+        return store.countCallsSince(startOfDay, actor);
+    }
+
+    public long usedToday() {
+        return usedToday(null);
     }
 
     public int dailyCap() {
@@ -87,6 +93,22 @@ public class AnalysisService {
 
     public boolean capped() {
         return usedToday() >= dailyCap();
+    }
+
+    /**
+     * 这个角色现在还能不能分析。
+     *
+     * <p>两层上限都要判：全局 daily-cap 是「今天全站花了多少钱」的保险丝，
+     * 演示账号的小额度是「这个角色最多花几次」。前者管总量，后者管分配，缺一不可 ——
+     * 只判角色额度的话，演示账号能突破全站上限。
+     *
+     * @param actorCap null = 该角色没有独立额度，只受全局上限约束
+     */
+    public boolean capped(String actor, Integer actorCap) {
+        if (usedToday() >= dailyCap()) {
+            return true;
+        }
+        return actorCap != null && usedToday(actor) >= actorCap;
     }
 
     /** 当前模型标识，给 /api/status 看，也用于判断线上到底跑的是哪个模型。 */
@@ -105,10 +127,12 @@ public class AnalysisService {
      * <p>语义是「用户点了就出结果」，所以三种情况不调模型：
      * 已经分析过且结果新鲜（返回旧结果）、有人正在分析（BUSY）、今日配额用完（CAPPED）。
      *
-     * @param force true 时无视新鲜度强制重算，只给运维手工调用，界面不暴露
+     * @param force    true 时无视新鲜度强制重算，只给运维手工调用，界面不暴露
+     * @param actor    谁触发的，记账用（rw / demo / ro）。null 当 rw
+     * @param actorCap 该角色的独立日额度，null = 只受全局 daily-cap 约束
      * @throws AnalysisException 所有可预期的失败都从这里出去，带状态码和错误码
      */
-    public Outcome analyzeNews(long id, boolean force) {
+    public Outcome analyzeNews(long id, boolean force, String actor, Integer actorCap) {
         if (!enabled()) {
             throw new AnalysisException(503, "DISABLED", "分析功能已关闭（app.analysis.enabled=false）");
         }
@@ -123,11 +147,16 @@ public class AnalysisService {
         if (!force && isFresh(before)) {
             return new Outcome(before, true);
         }
-        if (capped()) {
+        if (usedToday() >= dailyCap()) {
             // 以前这里在 Worker 里是一句静默 return，表现为「新消息永远停在待分析、日志里一个字都没有」。
             // 手动模式下必须说出来，否则用户只会重复点，把次数白耗在上限判断上。
             throw new AnalysisException(429, "CAPPED",
                     "今日分析已达上限 " + dailyCap() + " 条，明天再试（调整 app.analysis.daily-cap 可放宽）");
+        }
+        if (actorCap != null && usedToday(actor) >= actorCap) {
+            // 文案必须点明是哪个上限：演示账号看到「已达上限 300 条」只会以为是系统坏了
+            throw new AnalysisException(429, "CAPPED",
+                    "演示账号今日 " + actorCap + " 次分析已用完，明天再试");
         }
 
         // 原子认领：两个同事同时点同一条，只有一个能拿到这行，另一个拿空 → BUSY。
@@ -137,7 +166,7 @@ public class AnalysisService {
 
         // 先记账再调用：调用失败时 token 往往也已经花出去了，
         // 事后记会让「一直失败一直重试」变成不计数量的黑洞。
-        store.recordCall(id);
+        store.recordCall(id, actor);
 
         try {
             AnalysisResult r = analyzer.analyze(claimed);

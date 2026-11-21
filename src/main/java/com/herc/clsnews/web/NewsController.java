@@ -71,7 +71,8 @@ public class NewsController {
     @GetMapping("/news")
     public Map<String, Object> news(@RequestParam(defaultValue = "10") int limit,
                                     @RequestParam(defaultValue = "0") long since,
-                                    @RequestParam(defaultValue = "0") long before) {
+                                    @RequestParam(defaultValue = "0") long before,
+                                    HttpServletRequest req) {
         int n = Math.max(1, Math.min(limit, 200));
         List<News> rows;
         boolean hasMore;
@@ -96,7 +97,7 @@ public class NewsController {
         body.put("maxId", store.maxId());
         body.put("hasMore", hasMore);
         body.put("serverTime", Instant.now().getEpochSecond());
-        body.put("stats", stats());
+        body.put("stats", stats(roleOf(req)));
         return body;
     }
 
@@ -178,9 +179,11 @@ public class NewsController {
      */
     @PostMapping("/news/{id}/analyze")
     public ResponseEntity<?> analyze(@PathVariable long id,
-                                     @RequestParam(defaultValue = "false") boolean force) {
+                                     @RequestParam(defaultValue = "false") boolean force,
+                                     HttpServletRequest req) {
+        String role = roleOf(req);
         try {
-            AnalysisService.Outcome o = analysis.analyzeNews(id, force);
+            AnalysisService.Outcome o = analysis.analyzeNews(id, force, role, capOf(role));
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("item", toView(o.item()));
             body.put("cached", o.cached());
@@ -203,7 +206,7 @@ public class NewsController {
      * 看起来像「他那边能分析，我这边不行」。
      */
     @GetMapping("/analysis/state")
-    public Map<String, Object> analysisState(@RequestParam String ids) {
+    public Map<String, Object> analysisState(@RequestParam String ids, HttpServletRequest req) {
         List<Long> parsed = new ArrayList<>();
         for (String s : ids.split(",")) {
             if (parsed.size() >= 200) {
@@ -232,8 +235,9 @@ public class NewsController {
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("items", items);
-        body.put("analyzedToday", analysis.usedToday());
-        body.put("capped", analysis.capped());
+        String role = roleOf(req);
+        body.put("analyzedToday", analysis.usedToday(quotaActor(role)));
+        body.put("capped", analysis.capped(quotaActor(role), capOf(role)));
         return body;
     }
 
@@ -256,9 +260,9 @@ public class NewsController {
      */
     @GetMapping("/status")
     public Map<String, Object> status(HttpServletRequest req) {
-        Map<String, Object> body = new LinkedHashMap<>(stats());
-        Object role = req.getAttribute(BasicAuthFilter.ROLE_ATTR);
-        body.put("role", role == null ? "rw" : role);
+        String role = roleOf(req);
+        Map<String, Object> body = new LinkedHashMap<>(stats(role));
+        body.put("role", role);
         return body;
     }
 
@@ -404,14 +408,48 @@ public class NewsController {
     }
 
 
-    private Map<String, Object> stats() {
+    /**
+     * 当前请求的角色。没开鉴权时 {@link BasicAuthFilter} 这个 Bean 根本不存在，
+     * 请求属性也就没人设 —— 那种状态下按可写处理，和 /api/status 的口径保持一致。
+     */
+    private String roleOf(HttpServletRequest req) {
+        Object r = req.getAttribute(BasicAuthFilter.ROLE_ATTR);
+        return r == null ? BasicAuthFilter.ROLE_RW : String.valueOf(r);
+    }
+
+    /** 演示账号有独立的日额度；其余角色共用全局 daily-cap。null = 无独立上限。 */
+    private Integer capOf(String role) {
+        return BasicAuthFilter.ROLE_DEMO.equals(role) ? props.getSecurity().getDemoDailyCap() : null;
+    }
+
+    /** 展示用的上限数字。无独立上限时要落到全局值，不能把 null 丢给前端。 */
+    private int capFor(String role) {
+        Integer c = capOf(role);
+        return c == null ? analysis.dailyCap() : c;
+    }
+
+    /**
+     * 查用量时按谁的口径：演示账号看自己那本账，其他人看全站。
+     *
+     * <p>主账号必须看全站 —— daily-cap 是钱包的保险丝，只统计自己那一份的话，
+     * 演示账号和后台自动分析花掉的次数都不会出现在这个数字里。
+     */
+    private String quotaActor(String role) {
+        return BasicAuthFilter.ROLE_DEMO.equals(role) ? role : null;
+    }
+
+    private Map<String, Object> stats(String role) {
         Map<String, Object> s = new LinkedHashMap<>();
         s.put("total", store.count());
         s.put("pending", store.countByStatus("pending"));
-        // 访客按 IP + 自然日去重：今日 = 今天来过的不同 IP 数，总 = 历史累计的不同 IP 数
-        String today = LocalDate.now(ZoneId.systemDefault()).toString();
-        s.put("visitToday", visits.countToday(today));
-        s.put("visitTotal", visits.countTotal());
+        // 访客数字只给主账号和只读账号。演示账号连聚合数都看不到 ——
+        // 他要看的是「这条新闻模型怎么判」，站上有多少人在用跟他无关。
+        if (!BasicAuthFilter.ROLE_DEMO.equals(role)) {
+            // 访客按 IP + 自然日去重：今日 = 今天来过的不同 IP 数，总 = 历史累计的不同 IP 数
+            String today = LocalDate.now(ZoneId.systemDefault()).toString();
+            s.put("visitToday", visits.countToday(today));
+            s.put("visitTotal", visits.countTotal());
+        }
         s.put("source", source.name());
         s.put("intervalMs", props.getIntervalMs());
         s.put("lastRunAt", ingest.getLastRunAt());
@@ -426,9 +464,10 @@ public class NewsController {
         s.put("analysisProvider", analysis.modelName());
         // 部署后第一眼看这个：false 说明 key 没配好，点击分析会全失败，但采集是正常的
         s.put("analysisReady", analysis.ready());
-        s.put("analyzedToday", analysis.usedToday());
-        s.put("analysisCap", analysis.dailyCap());
-        s.put("analysisCapped", analysis.capped());
+        // 配额按角色给：演示账号只该看到自己那 10 次，看到全站的 300 会以为额度还很宽
+        s.put("analyzedToday", analysis.usedToday(quotaActor(role)));
+        s.put("analysisCap", capFor(role));
+        s.put("analysisCapped", analysis.capped(quotaActor(role), capOf(role)));
         if (!analysis.usage().isBlank()) {
             s.put("analysisUsage", analysis.usage());
         }

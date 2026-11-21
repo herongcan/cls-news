@@ -82,6 +82,13 @@ app:
     # 且看不到 /api/visits/logs 的访客明细。给朋友 / 面试演示用这个，别发主账号——
     # 主账号能触发分析（烧 daily-cap）也能看所有人的 IP。
     read-only: ${APP_READONLY:}
+    # 演示账号，格式 user:pass（多个用逗号分隔，环境变量 APP_DEMO）。
+    # 比只读多一项：能点「分析」。比主账号少两样：每天只有 demo-daily-cap 次，
+    # 且访客数据整个不可见（连今日访客聚合数都不给）。
+    # 注意它的密码是公开写在登录页上的（本来就是给面试演示用的），
+    # 所以真正的止损线是 demo-daily-cap —— 设成 0 等于关闭演示权限。
+    demo: ${APP_DEMO:}
+    demo-daily-cap: ${APP_DEMO_DAILY_CAP:10}
     permit-paths:
       - /healthz
     # 是否信任 X-Forwarded-For / X-Real-IP。

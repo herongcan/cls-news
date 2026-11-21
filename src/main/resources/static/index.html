@@ -70,7 +70,12 @@
      这在「把链接发给朋友」的场景里是实打实的坑。 */
   #roBadge{color:var(--dim);border:.5px solid var(--line-2);
            border-radius:4px;padding:1px 6px}
-  #roBadge[hidden],#logout[hidden]{display:none}
+  /* 演示徽标与只读同一套形状，只是颜色更「活」一点：
+     两者都是限制性角色，但演示是能用的，别让人以为按钮坏了。 */
+  #demoBadge{color:var(--amber);border:.5px solid var(--amber-line);
+             border-radius:4px;padding:1px 6px}
+  #roBadge[hidden],#logout[hidden],#demoBadge[hidden]{display:none}
+  #visits[hidden],#visitsSep[hidden]{display:none}
   button{background:transparent;border:.5px solid var(--line-2);color:var(--muted);
          font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:inherit}
   button:hover{border-color:var(--hover-line);color:var(--text)}
@@ -213,6 +218,14 @@
   #gate button:hover{color:var(--on-accent);border:none}
   #gate button:disabled{opacity:.55;cursor:default}
   .gate-err{color:var(--up);font-size:12px;min-height:18px;text-align:center}
+  /* 演示账号提示。密码明着写在页面上是刻意的 —— 这个账号存在的目的就是让外人
+     直接试，藏起来等于没写。真正的止损线是服务端每天 10 次的额度，
+     以及访客数据整个不对它开放。
+     改服务端 APP_DEMO 时要同步改这里的文案，两处不一致会让来试的人 401。 */
+  .gate-demo{color:var(--dim);font-size:11px;line-height:1.7;text-align:center;
+             border-top:.5px solid var(--line);padding-top:10px;margin-top:4px}
+  .gate-demo b{color:var(--muted);font-weight:500;
+               font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 </style>
 <script>
 /* 首帧之前就把主题钉死，否则会先画一帧深色再跳成浅色，白屏闪一下很难看。
@@ -243,6 +256,7 @@
     <input id="gp" type="password" placeholder="密码" autocomplete="current-password">
     <button id="gbtn" type="submit">进入</button>
     <div id="gerr" class="gate-err"></div>
+    <div class="gate-demo">演示账号 <b>demo</b> / <b>demo</b></div>
   </form>
 </div>
 
@@ -256,7 +270,7 @@
     <span>已收录 <b id="count">0</b> 条</span>
     <span>·</span>
     <span id="visits" title="按 IP 去重，同一 IP 一天只算一个访客">今日访客 <b id="vToday">0</b> · 累计 <b id="vTotal">0</b></span>
-    <span>·</span>
+    <span id="visitsSep">·</span>
     <span id="anaToday">今日调用 0</span>
     <span>·</span>
     <span id="last">等待首次抓取</span>
@@ -266,6 +280,7 @@
       stroke-linejoin="round" aria-hidden="true" focusable="false" width="13" height="13"
       ><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></button>
     <span id="roBadge" hidden title="当前账号为只读：不能触发分析，也看不到访客明细">只读</span>
+    <span id="demoBadge" hidden title="演示账号：每天能分析 10 条，访客统计不对它开放">演示</span>
     <button id="logout" hidden>退出</button>
     <span id="devbadge" hidden
           title="服务端 app.security.enabled=false（本地开发默认），接口没有鉴权，不带凭证也能直接拿到数据">本地模式 · 无鉴权</span>
@@ -313,6 +328,9 @@
   const qClearEl = document.getElementById('qclear');
   const devBadgeEl = document.getElementById('devbadge');
   const roBadgeEl = document.getElementById('roBadge');
+  const demoBadgeEl = document.getElementById('demoBadge');
+  const visitsEl = document.getElementById('visits');
+  const visitsSepEl = document.getElementById('visitsSep');
   const logoutEl = document.getElementById('logout');
 
   /* ---------------- 主题：自动 / 浅色 / 深色 ---------------- */
@@ -800,6 +818,12 @@
         setTimeout(() => refreshOne(id), 3000);
         return;
       }
+      if (res.status === 429) {
+        // 额度用完（全站 daily-cap 或演示账号的每日 10 次）。
+        // 这里不能再给「重试」按钮：点几次都是同一个 429，白费力气还像坏了。
+        setAna(li, '<span class="note err">' + esc(data.error || '今日分析额度已用完') + '</span>');
+        return;
+      }
       if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
 
       applyItem(data.item);
@@ -1186,7 +1210,16 @@
       const res = await api('/api/status');
       if (!res.ok) return;
       const st = await res.json();
+      // 三档：rw 全部权限，demo 能分析但额度封死，ro 只能看。
+      // 只有 ro 藏掉分析按钮 —— demo 的核心就是点那一下看模型怎么判。
       canWrite = st.role !== 'ro';
+      if (st.role === 'demo') {
+        demoBadgeEl.hidden = false;
+        // 访客统计整段收起来，连带它后面那个分隔点，否则顶栏会剩下一个孤零零的「·」。
+        // 服务端本来也不下发这两个数字，这里只是把空壳一起摘掉。
+        visitsEl.hidden = true;
+        visitsSepEl.hidden = true;
+      }
     } catch (_) {
       return;
     }

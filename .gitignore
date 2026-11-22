@@ -12,6 +12,10 @@ data/*.db-shm
 deploy/laptop/config.env
 logs/
 
-# 评测产物：人工标注是本地判断（含个人观点），不进仓库
-tools/eval/labels.csv
-tools/eval/answers.csv
+# 评测产物：人工标注是本地判断（含个人观点），不进仓库。
+# 用通配而不是逐个列举：导出脚本每次都带版本号（answers-v2/v3…），
+# 逐个列举等于每次导出完都要回来改这一行，迟早漏掉一个。
+tools/eval/answers*.csv
+tools/eval/labels*.csv
+tools/eval/labels*.csv.bak
+tools/eval/review.html

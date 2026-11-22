@@ -1,0 +1,226 @@
+name: ci
+
+# PR 与 main 的守卫。只管两件事：
+#
+#   1. 代码还能不能编译（前端双端构建、后端 fat jar）。
+#   2. 鉴权有没有被写漏。
+#
+# 第 2 点不是凑数：2026-11-22 上线 Vue 产物后页面白屏，原因是 BasicAuthFilter 只放行了
+# /index.html，浏览器加载 <script src="/assets/..."> 时不带 Authorization 头，全部 401。
+# 旧页面把 CSS/JS 内联在 HTML 里，这个洞潜伏了很久。下面那组断言就是防止它再回来。
+#
+# 不跑测试：仓库里没有能挡住问题的用例，让门禁卡在形式上的绿灯只会让人习惯性忽略红灯。
+# 真正能挡的是「起真进程 + 打真接口」这几条，所以冒烟用 java -jar 起真实例。
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 与 deploy.yml 相反：PR 上新的 push 要顶掉旧运行，没人关心被覆盖 commit 的结果。
+# deploy 不能取消，中途 kill 会留下「代码已更新、容器还是旧的」中间态。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: frontend (type-check + build h5/mp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # 用 ci 而不是 install：lockfile 与 package.json 不一致时立刻失败。
+      # 三个 @dcloudio 包钉在同一个 alpha 版本号上，版本错开会报内部 API 不匹配，
+      # 那种错误信息看不出是依赖问题，所以宁可在安装阶段就炸。
+      - name: 安装依赖
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查
+        working-directory: web
+        run: npm run type-check
+
+      - name: 构建 H5
+        working-directory: web
+        run: npm run build:h5
+
+      - name: 构建微信小程序
+        working-directory: web
+        run: npm run build:mp
+
+      # 体积和文件数都要看：构建成功但产物缺页，是可发生的（pages.json 漏配一类）。
+      - name: 校验产物
+        working-directory: web
+        run: |
+          set -e
+          H5=dist/build/h5
+          MP=dist/build/mp-weixin
+
+          for f in "$H5/index.html" "$MP/app.json" "$MP/pages/index/index.wxml"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少构建产物 $f"
+              exit 1
+            fi
+          done
+
+          if ! ls "$H5"/assets/*.js >/dev/null 2>&1; then
+            echo "::error::$H5/assets 下没有 js，H5 产物异常"
+            exit 1
+          fi
+
+          echo "H5  $(du -sh "$H5" | cut -f1)  $(find "$H5" -type f | wc -l) 个文件"
+          echo "MP  $(du -sh "$MP" | cut -f1)  $(find "$MP" -type f | wc -l) 个文件"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: |
+            web/dist/build/h5
+            web/dist/build/mp-weixin
+          retention-days: 7
+
+  backend:
+    name: backend (package + smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: 缓存 Maven Wrapper 下载的 Maven 本体
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/wrapper
+          key: mvnw-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+          restore-keys: mvnw-${{ runner.os }}-
+
+      - name: 打包
+        run: ./mvnw -B -DskipTests package
+
+      - name: 校验是 Spring Boot fat jar
+        run: |
+          JAR=target/cls-news-0.1.0.jar
+          [ -f "$JAR" ] || { echo "::error::打包后找不到 $JAR"; exit 1; }
+          ls -lh "$JAR"
+          # 不是 fat jar 时服务器上会报 no main manifest attribute，
+          # 得往上翻日志才看得出来，不如在这里直接拦住。
+          unzip -l "$JAR" | grep -q 'BOOT-INF/' || {
+            echo "::error::$JAR 不是 fat jar，检查 spring-boot-maven-plugin"; exit 1; }
+
+      - name: 启动实例并断言鉴权行为
+        run: |
+          set -u
+          JAR=target/cls-news-0.1.0.jar
+          DB="$RUNNER_TEMP/smoke.db"
+          LOG="$RUNNER_TEMP/backend.log"
+          BASE=http://127.0.0.1:18080
+
+          # 用独立端口与独立库：不碰仓库里的 data/，也不和任何既有服务抢 8080。
+          APP_USER=admin APP_PASSWORD=admin \
+          APP_GUEST='guest:guest' APP_GUEST_DAILY_CAP=10 \
+          DB_PATH="$DB" \
+          java -jar "$JAR" --server.port=18080 > "$LOG" 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+
+          ready=0
+          for _ in $(seq 1 45); do
+            if curl -fsS -o /dev/null --max-time 2 "$BASE/healthz"; then ready=1; break; fi
+            sleep 2
+          done
+          if [ "$ready" != 1 ]; then
+            echo "::error::后端 90 秒内没有就绪"
+            tail -80 "$LOG"
+            exit 1
+          fi
+          echo "后端已就绪"
+
+          code() { curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$@"; }
+          fail=0
+
+          # assert <期望码> <说明> <curl 参数...>
+          assert() {
+            local want="$1" desc="$2"; shift 2
+            local got; got=$(code "$@")
+            printf '%-46s 期望 %s  实际 %s\n' "$desc" "$want" "$got"
+            [ "$got" = "$want" ] || fail=1
+          }
+          # 只要求不是 200：这类请求的具体拒绝码取决于容器对路径的规范化时机
+          assert_blocked() {
+            local desc="$1"; shift
+            local got; got=$(code "$@")
+            printf '%-46s 期望 非200  实际 %s\n' "$desc" "$got"
+            [ "$got" != "200" ] || fail=1
+          }
+
+          echo "--- 入口与静态资源 ---"
+          assert 200 '首页'                          "$BASE/"
+          assert 200 'legacy.html 回滚入口'           "$BASE/legacy.html"
+
+          # 从真实产物里取一个资源名，而不是写死哈希。
+          # 写死的好处是稳定，坏处是每次构建都会让它失效，最后只能被注释掉。
+          ASSET=$(cd target/classes/static && ls assets/*.js 2>/dev/null | head -1)
+          if [ -n "${ASSET:-}" ]; then
+            # 必须写成 ${ASSET}：紧跟全角括号时 $ASSET 的变量名边界依赖 locale，
+            # 在 C locale 下 bash 按字节判断，会把全角字符的首字节吞进变量名。
+            assert 200 "构建资源 /${ASSET}（不带凭证）"   "$BASE/$ASSET"
+          else
+            echo "::warning::target/classes/static/assets 下没有 js，跳过静态资源断言"
+          fi
+
+          echo "--- API 仍需鉴权 ---"
+          assert 401 '无凭证 /api/status'              "$BASE/api/status"
+          assert 200 'admin /api/status'               -u 'admin:admin' "$BASE/api/status"
+          assert 200 'guest /api/status'               -u 'guest:guest' "$BASE/api/status"
+          assert 403 'guest /api/visits'               -u 'guest:guest' "$BASE/api/visits"
+
+          echo "--- 不许借静态前缀绕过 ---"
+          assert_blocked '/assets/../api/status'              --path-as-is "$BASE/assets/../api/status"
+          assert_blocked '/assets/%2e%2e/api/status'          --path-as-is "$BASE/assets/%2e%2e/api/status"
+          assert_blocked '/assets/..%2fapi/status'            --path-as-is "$BASE/assets/..%2fapi/status"
+          assert_blocked '/healthz/../api/status'             --path-as-is "$BASE/healthz/../api/status"
+
+          echo "--- 角色能力差异 ---"
+          role=$(curl -s -u 'admin:admin' "$BASE/api/status" | jq -r '.role')
+          [ "$role" = "rw" ] || { echo "::error::admin 的角色是 $role，期望 rw"; fail=1; }
+          guest_has_visit=$(curl -s -u 'guest:guest' "$BASE/api/status" | jq -r 'has("visitToday")')
+          [ "$guest_has_visit" = "false" ] || {
+            echo "::error::guest 的 /api/status 不应下发 visitToday"; fail=1; }
+          echo "admin role=$role, guest 下发访客数=$guest_has_visit"
+
+          if [ "$fail" != 0 ]; then
+            echo "::error::有断言未通过"
+            echo "--- 后端日志尾部 ---"
+            tail -60 "$LOG"
+            exit 1
+          fi
+          echo "全部断言通过"
+
+      - name: 失败时上传后端日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-log
+          path: ${{ runner.temp }}/backend.log
+          retention-days: 7
+          if-no-files-found: ignore

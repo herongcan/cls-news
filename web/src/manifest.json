@@ -1,5 +1,5 @@
 {
-  "name": "财经快讯分析助手",
+  "name": "实时资讯助手",
   "appid": "",
   "description": "实时资讯聚合与分析助手",
   "versionName": "0.1.0",
@@ -11,7 +11,7 @@
     "compilerVersion": 3
   },
   "h5": {
-    "title": "财经快讯分析助手",
+    "title": "实时资讯助手",
     "router": { "mode": "hash", "base": "/" },
     "optimization": { "treeShaking": { "enable": true } }
   },

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { onMounted } from 'vue'
 import { onAppHide, onAppShow, onPullDownRefresh, onReachBottom } from '@dcloudio/uni-app'
 import NewsItem from '@/components/NewsItem.vue'
@@ -39,6 +39,22 @@ const gateBusy = ref(false)
 let debounce: ReturnType<typeof setTimeout> | null = null
 
 const stats = computed(() => auth.stats)
+
+/**
+ * 站点名分两套：登录层是「实时资讯聚合与分析助手」，进了信息流叫「实时资讯助手」。
+ *
+ * 静态值（index.html 的 <title>、pages.json 的 navigationBarTitleText）只能是开场那一屏的名字，
+ * 因为它写在 HTML 里、不认登录态；登录之后由这里切。H5 改的是浏览器标签页，
+ * 小程序改的是原生导航栏，`uni.setNavigationBarTitle` 两个平台都认。
+ */
+const TITLE_GATE = '实时资讯聚合与分析助手'
+const TITLE_APP = '实时资讯助手'
+
+function syncTitle(): void {
+  uni.setNavigationBarTitle({ title: auth.logged ? TITLE_APP : TITLE_GATE })
+}
+
+watch(() => auth.logged, () => syncTitle())
 
 /** 数据源标签只取第一段：完整值是「cls.cn /v1/roll/get_roll_list」，窄屏会把标题挤没 */
 const srcShort = computed(() => (stats.value?.source || 'cls.cn').split(/\s+/)[0])
@@ -92,6 +108,8 @@ onMounted(async () => {
   } finally {
     booting.value = false
   }
+  // 老用户带着令牌进来是直接落在信息流上的，不会触发 logged 的 watch，得手动对一次
+  syncTitle()
   if (auth.logged) {
     pingVisit()
     await reload()
@@ -197,7 +215,7 @@ function dismissNotice(): void {
     <!-- 登录层：移动端浏览器不弹 Basic 原生框，凭证只能由页面自己收 -->
     <view v-else-if="!auth.logged" class="gate">
       <view class="gate-form">
-        <view class="gate-title">财经快讯分析助手</view>
+        <view class="gate-title">实时资讯聚合与分析助手</view>
         <view class="gate-sub">内部工具 · 请输入账号密码</view>
         <input v-model="form.u" class="inp" placeholder="账号" autocomplete="username" />
         <input
@@ -225,7 +243,7 @@ function dismissNotice(): void {
         <view class="row">
           <view class="brand">
             <text class="dot" :class="dotClass" />
-            <text class="h1">财经快讯分析助手</text>
+            <text class="h1">实时资讯助手</text>
             <text class="src" :title="srcFull">{{ srcShort }}</text>
           </view>
           <view class="acts">

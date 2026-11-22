@@ -285,6 +285,13 @@ public class BasicAuthFilter extends OncePerRequestFilter {
      * 下游容器再解码一次，能不能挡住取决于具体实现，这里不赌。
      */
     private boolean isPublicAsset(String uri) {
+        // 临时实验：故意回退成「只放行 HTML」的状态，用来验证 CI 门禁能拦住
+        // 2026-11-22 那次白屏回归。验证完这个分支即删除，不合并。
+        // 条件写成 uri != null 是为了让编译器不把后续代码判成 unreachable
+        // （用 if (true) 会直接编译失败，那就测不到断言了）。
+        if (uri != null) {
+            return false;
+        }
         if (!uri.startsWith(ASSET_PREFIX) || looksLikeTraversal(uri)) {
             return false;
         }

@@ -46,7 +46,6 @@ import java.util.regex.Pattern;
 public class BasicAuthFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(BasicAuthFilter.class);
-    private static final String REALM = "cls-news";
 
     /** 请求属性名：当前请求的角色，供 /api/status 回给前端决定要不要显示写操作。 */
     public static final String ROLE_ATTR = "cls.role";
@@ -117,6 +116,21 @@ public class BasicAuthFilter extends OncePerRequestFilter {
     /** 前端构建产物，浏览器加载时不会带任何凭证头。 */
     private static final String ASSET_PREFIX = "/assets/";
 
+    /**
+     * 浏览器自己会来要、但页面上根本没引用的文件。
+     *
+     * <p>为什么要单独放行：Chrome 打开任何页面都会自动请求 {@code /favicon.ico}。
+     * 它不在放行名单里 → 401 + {@code WWW-Authenticate} → Chrome 判定「整站需要 HTTP 认证」，
+     * 直接在页面上盖一层原生登录框（标题是「登录 http://host」那个），页面自己的登录层
+     * 连露脸的机会都没有，而且在框里输对了也关不掉。实测复现：{@code curl -D- /favicon.ico}。
+     *
+     * <p>放行后这些路径由 Spring 的静态资源处理器返回 404，浏览器记一条日志就过去了 ——
+     * 比弹一个关不掉的框好。
+     */
+    private static final Set<String> BROWSER_PROBES = Set.of(
+            "/favicon.ico", "/robots.txt",
+            "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png");
+
     private final AccountStore accounts;
     private final TokenStore tokens;
     private final Set<String> permitPaths;
@@ -140,6 +154,7 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         // 能不能挡住完全取决于 Tomcat 的实现，等于把安全交给别人的默认值。
         // 另外显式拒绝带 .. 或 // 的请求：规范化时机在不同容器/版本上不一致，不赌。
         if ((permitPaths.contains(uri) || PAGE_PATHS.contains(uri)
+                || BROWSER_PROBES.contains(uri)
                 || isPublicAsset(uri) || isAuthEndpoint(req, uri))
                 && !looksLikeTraversal(uri)) {
             chain.doFilter(req, resp);
@@ -163,7 +178,7 @@ public class BasicAuthFilter extends OncePerRequestFilter {
             }
             // token 无效直接 401，不落到下面的 Basic 分支：
             // 带着过期 token 的请求再回头试 Basic 没有意义，前端拿到 401 会自己刷新。
-            unauthorized(req, resp, uri);
+            unauthorized(resp);
             return;
         }
 
@@ -186,20 +201,27 @@ public class BasicAuthFilter extends OncePerRequestFilter {
             }
         }
 
-        unauthorized(req, resp, uri);
+        unauthorized(resp);
     }
 
     private static boolean isAuthEndpoint(HttpServletRequest req, String uri) {
         return AUTH_ENDPOINTS.contains(uri) && "POST".equals(req.getMethod());
     }
 
-    private void unauthorized(HttpServletRequest req, HttpServletResponse resp, String uri) throws IOException {
+    /**
+     * 401。**故意不发 {@code WWW-Authenticate}**。
+     *
+     * <p>原来只在非 /api/ 路径上发 challenge，想把「浏览器原生弹框」留给页面请求。
+     * 实际效果是反的：只要有任何一条页面侧的请求返回 401（最先踩到的是浏览器自动请求的
+     * {@code /favicon.ico}），Chrome / Safari 就会在页面之上盖一层原生认证框，
+     * 而页面自己的登录层还在下面 —— 用户在原生框里输对了也关不掉，输错了还会一直重弹。
+     *
+     * <p>这个项目只有一个页面、一个登录层，凭证由页面收、由 {@code /api/auth/token} 换发，
+     * 所以不需要（也不想要）任何原生认证交互。运维用 {@code curl -u} 照样能过，
+     * 那走的是请求头，与 challenge 无关。
+     */
+    private void unauthorized(HttpServletResponse resp) throws IOException {
         resp.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-        // 只给非 API 请求发 challenge：否则 Safari 会在页内登录层之上再弹一个原生框，
-        // 输完还关不掉。
-        if (!uri.startsWith("/api/")) {
-            resp.setHeader("WWW-Authenticate", "Basic realm=\"" + REALM + "\", charset=\"UTF-8\"");
-        }
         resp.setContentType("text/plain;charset=UTF-8");
         resp.getWriter().write("需要登录");
     }

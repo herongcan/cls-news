@@ -188,6 +188,26 @@ jobs:
             echo "::warning::target/classes/static/assets 下没有 js，跳过静态资源断言"
           fi
 
+          echo "--- 不许弹浏览器原生登录框 ---"
+          # Chrome 打开任何页面都会自动请求 /favicon.ico。它一旦回 401 + WWW-Authenticate，
+          # 浏览器就判定「整站要 HTTP 认证」，在页面之上盖一层原生框，页面自己的登录层
+          # 被埋在下面，输对了也关不掉。所以断言的是「不带 challenge」，不是「返回 200」。
+          FAVICO=$(curl -s -o /dev/null -D- "$BASE/favicon.ico" | tr -d '\r')
+          if printf '%s' "$FAVICO" | grep -qi '^WWW-Authenticate:'; then
+            echo "::error::/favicon.ico 带了 WWW-Authenticate，浏览器会弹原生登录框"; fail=1
+          fi
+          FAVICO_CODE=$(printf '%s' "$FAVICO" | head -1 | awk '{print $2}')
+          if [ "$FAVICO_CODE" = "401" ]; then
+            echo "::error::/favicon.ico 返回 401（期望 404）"; fail=1
+          fi
+          echo "favicon 状态=${FAVICO_CODE}，无 challenge"
+
+          # 上面那条的通用版：任何 401 都不许带 challenge，否则换个路径又会把框带回来
+          NO_CHALLENGE=$(curl -s -o /dev/null -D- "$BASE/api/status" | tr -d '\r')
+          if printf '%s' "$NO_CHALLENGE" | grep -qi '^WWW-Authenticate:'; then
+            echo "::error::401 响应里出现了 WWW-Authenticate"; fail=1
+          fi
+
           echo "--- API 仍需鉴权 ---"
           assert 401 '无凭证 /api/status'              "$BASE/api/status"
           assert 200 'admin /api/status'               -u 'admin:admin' "$BASE/api/status"

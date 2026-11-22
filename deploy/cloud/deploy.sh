@@ -136,6 +136,8 @@ rsync -az --delete \
   --exclude 'deploy/laptop/config.env' \
   --exclude '*.log' \
   --exclude '.DS_Store' \
+  --exclude 'web/node_modules' \
+  --exclude 'web/dist' \
   "$PROJECT_DIR/" "$HOST:$REMOTE_DIR/"
 
 # ---------- 5. 写 .env ----------

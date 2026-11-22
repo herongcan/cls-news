@@ -1,0 +1,18 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationStyle": "custom",
+        "enablePullDownRefresh": true,
+        "backgroundTextStyle": "dark"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTitleText": "财经快讯分析助手",
+    "navigationBarBackgroundColor": "#0a0b0d",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#0a0b0d"
+  }
+}

@@ -58,8 +58,23 @@ public class BasicAuthFilter extends OncePerRequestFilter {
      * <p>移动端内置浏览器（微信 / QQ / UC、Android WebView）遇到 401 + {@code WWW-Authenticate}
      * 不会弹原生输入框，只渲染一张白页。所以凭证由页面自己收：index.html 只是个空壳，
      * 数据都在 /api/** 后面。
+     *
+     * <p>{@code /legacy.html} 是旧的手写页面，由 sync-to-jar 在首次覆盖时留底。它同样
+     * 是空壳（资源全部内联），放行才能作为回滚入口直接打开。
      */
-    private static final Set<String> PAGE_PATHS = Set.of("/", "/index.html");
+    private static final Set<String> PAGE_PATHS = Set.of("/", "/index.html", "/legacy.html");
+
+    /**
+     * 前端构建产物的路径前缀。
+     *
+     * <p>页面免鉴权只解决了一半问题：uni-app 打包后 JS 与 CSS 是独立的 {@code /assets/*}
+     * 文件，而浏览器加载 {@code <script src>} / {@code <link href>} 时**不会**带
+     * Authorization 头。这些资源一旦要求鉴权，页面就只剩一张白屏 —— 旧页面把所有
+     * CSS/JS 内联进 index.html，所以这个坑直到换成构建产物才暴露。
+     *
+     * <p>放行是安全的：产物里只有渲染逻辑，不含任何数据，数据全在 /api/** 后面。
+     */
+    private static final String ASSET_PREFIX = "/assets/";
 
     /** 只读账号也不给看的路径：访客明细含所有人的 IP 和 UA，聚合数可以给。 */
     private static final Set<String> READ_ONLY_DENY = Set.of("/api/visits/logs");
@@ -145,7 +160,8 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         // /healthz/../api/status 会因为前缀是 /healthz 而被放行，然后交给下游做路径规范化——
         // 能不能挡住完全取决于 Tomcat 的实现，等于把安全交给别人的默认值。
         // 另外显式拒绝带 .. 或 // 的请求：规范化时机在不同容器/版本上不一致，不赌。
-        if ((permitPaths.contains(uri) || PAGE_PATHS.contains(uri)) && !looksLikeTraversal(uri)) {
+        if ((permitPaths.contains(uri) || PAGE_PATHS.contains(uri) || isPublicAsset(uri))
+                && !looksLikeTraversal(uri)) {
             chain.doFilter(req, resp);
             return;
         }
@@ -258,5 +274,29 @@ public class BasicAuthFilter extends OncePerRequestFilter {
     /** 白名单路径里带 .. / // / ; 一律不放行，交给鉴权流程处理。 */
     private boolean looksLikeTraversal(String uri) {
         return uri.contains("..") || uri.contains("//") || uri.contains(";");
+    }
+
+    /**
+     * 是否是可以匿名取的前端资源。
+     *
+     * <p>除了前缀与路径穿越检查，还把字符限制在构建产物实际会用到的集合（字母数字与
+     * {@code . _ - /}）。出现 {@code %} 或 {@code \} 说明是编码过的绕行尝试
+     * （例如 {@code /assets/..%2fapi/status}），直接拒绝 —— 前缀匹配之后路径会交给
+     * 下游容器再解码一次，能不能挡住取决于具体实现，这里不赌。
+     */
+    private boolean isPublicAsset(String uri) {
+        if (!uri.startsWith(ASSET_PREFIX) || looksLikeTraversal(uri)) {
+            return false;
+        }
+        for (int i = 0; i < uri.length(); i++) {
+            char c = uri.charAt(i);
+            boolean safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')
+                    || c == '.' || c == '_' || c == '-' || c == '/';
+            if (!safe) {
+                return false;
+            }
+        }
+        return true;
     }
 }

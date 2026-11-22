@@ -1,0 +1,30 @@
+{
+  "name": "cls-news-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "财经快讯分析助手前端（uni-app + Vue3 + TS，一套代码出 H5 与微信小程序）",
+  "scripts": {
+    "dev:h5": "uni",
+    "dev:mp": "uni -p mp-weixin",
+    "build:h5": "uni build",
+    "build:mp": "uni build -p mp-weixin",
+    "sync:jar": "node scripts/sync-to-jar.mjs",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@dcloudio/uni-app": "3.0.0-alpha-5030720261117001",
+    "@dcloudio/uni-components": "3.0.0-alpha-5030720261117001",
+    "@dcloudio/uni-h5": "3.0.0-alpha-5030720261117001",
+    "@dcloudio/uni-mp-weixin": "3.0.0-alpha-5030720261117001",
+    "pinia": "2.2.2",
+    "vue": "3.4.21"
+  },
+  "devDependencies": {
+    "@dcloudio/types": "^3.4.8",
+    "@dcloudio/uni-cli-shared": "3.0.0-alpha-5030720261117001",
+    "@dcloudio/vite-plugin-uni": "3.0.0-alpha-5030720261117001",
+    "typescript": "5.5.4",
+    "vite": "5.2.8",
+    "vue-tsc": "2.0.29"
+  }
+}

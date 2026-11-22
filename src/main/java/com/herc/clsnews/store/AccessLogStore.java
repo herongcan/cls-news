@@ -223,8 +223,11 @@ public class AccessLogStore {
      *
      * <p>和 {@code VisitStore.normalize} 同一原则：整条拒收，不做「滤掉非法字符再收下」。
      * 后者会把任意内容清洗成一个看起来合法的串，等于让它进了库。
+     *
+     * <p>public 是因为 {@code VisitStore} 的去重键也用它 —— 两张表必须认可同一批 vid，
+     * 否则明细里能查到的人，聚合里会少一个。清洗只做一次，由 Controller 调用。
      */
-    private static String cleanVid(String raw) {
+    public static String cleanVid(String raw) {
         if (raw == null) {
             return null;
         }

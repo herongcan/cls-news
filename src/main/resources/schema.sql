@@ -39,6 +39,8 @@ CREATE INDEX IF NOT EXISTS idx_call_ts ON analysis_call (ts);
 -- 主键就是去重规则本身，所以「今日访客」= COUNT(*) WHERE day=?，
 -- 「总访客」= COUNT(DISTINCT ip)，不需要额外去重逻辑。
 -- hits 记的是当天这个 IP 打开页面的次数（PV），只存不展示，留着以后看趋势。
+-- 旧口径：按「IP + 自然日」去重。已退役，不再写入 —— 表留在库里只是为了
+-- 历史数据还能查、还能和页面上新的数字对得上账。新代码请用下面的 visitor。
 CREATE TABLE IF NOT EXISTS visit (
     ip       TEXT    NOT NULL,
     day      TEXT    NOT NULL,                        -- yyyy-MM-dd，服务器本地时区
@@ -49,6 +51,31 @@ CREATE TABLE IF NOT EXISTS visit (
 );
 
 CREATE INDEX IF NOT EXISTS idx_visit_day ON visit (day);
+
+-- 访客聚合（当前口径）：按「设备标识 + 自然日」去重。
+--
+-- k 是去重键，两种形态：
+--   'v:' + vid  —— 浏览器/小程序本地生成并持久化的随机串，同一个人的多天访问共用一个 k
+--   'ip:' + ip  —— 没拿到 vid 时（无痕模式、清过缓存、老客户端）退回按 IP
+--
+-- 为什么不直接给 visit 加一列 vid：visit 的主键 (ip, day) 就是去重规则，
+-- 同一出口 IP 下的两个人会被并进同一行，vid 只能存下最后一个 —— 加了列也算不准。
+-- SQLite 又不支持改主键，所以另起一张表，粒度从一开始就定对。
+--
+-- vid 的局限写在明处：它能被清空（无痕模式）、能被伪造（客户端随便生成）。
+-- 所以它只是「比 IP 更细的去重维度」，不是身份，不能当账号用。
+CREATE TABLE IF NOT EXISTS visitor (
+    k        TEXT    NOT NULL,
+    day      TEXT    NOT NULL,
+    ip       TEXT    NOT NULL,                        -- 留档排查用，不参与去重
+    vid      TEXT,                                    -- 空 = 这次没拿到 vid，k 用的是 ip
+    first_ts INTEGER NOT NULL,
+    last_ts  INTEGER NOT NULL,
+    hits     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (k, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_visitor_day ON visitor (day);
 
 -- 访问明细：每次「登录成功后打开页面」一行。
 --

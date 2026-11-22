@@ -12,29 +12,34 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.Base64;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * HTTP Basic 认证 + 三档角色（rw / guest / ro）。只在 {@code app.security.enabled=true} 时生效。
+ * 三档角色鉴权。只在 {@code app.security.enabled=true} 时生效。
  *
- * <p>账号在启动时从配置解析进内存 Map，不查库：这是私用工具的闸门，不是权限系统。
+ * <p>为什么不用 spring-boot-starter-security：那套会自带默认登录页、CSRF、会话等一整串行为，
+ * 对一个只有一页前端的私用工具来说，需要关掉的东西比要打开的多。这里一百多行 Filter
+ * 已经把这件事说完，且行为完全可预期。
  *
- * <p>三档按「能造成多大伤害」划分，不是「能看多少东西」：
+ * <p>两种凭证并存，分工明确：
  * <ul>
- *   <li><b>rw</b> 主账号：全部权限，能看所有人的 IP，能把配额烧光。</li>
- *   <li><b>guest</b> 游客：能点「分析」，但每天额度封死，访客模块整个不可见。
- *       密码公开写在登录页上，额度就是止损线。</li>
- *   <li><b>ro</b> 只读：只能 GET，看不到访客明细。</li>
+ *   <li><b>Bearer token</b> —— 浏览器/小程序的日常请求。短期、不含密码、可作废。</li>
+ *   <li><b>Basic</b> —— 只用于两处：{@code POST /api/auth/token} 换令牌，以及运维的
+ *       {@code curl -u}。保留它是为了排查问题时不必先换一次 token。</li>
  * </ul>
  *
- * <p>Basic 的密码是 Base64 明文，不是加密：**必须套 HTTPS**。
+ * <p>三档角色的划分理由是「能造成多大伤害」，不是「能看多少东西」：
+ * <ul>
+ *   <li><b>rw</b>（主账号）—— 全部权限。能看所有人的 IP，能把配额烧光。</li>
+ *   <li><b>guest</b> —— 能点「分析」（演示的核心就是看模型怎么说），但每天额度封死，
+ *       且访客模块整个不可见。密码公开写在登录页上，所以额度就是止损线。</li>
+ *   <li><b>ro</b>（只读）—— 只能 GET，看不了访客明细。给朋友看数据用。</li>
+ * </ul>
+ *
+ * <p>注意：Basic 的密码是 Base64 明文，不是加密。**必须套 HTTPS**，
+ * 否则等同明文密码在公网上裸奔。token 也是同样道理 —— 明文 Bearer token 被截获即可冒用。
  */
 @Component
 @ConditionalOnProperty(prefix = "app.security", name = "enabled", havingValue = "true")
@@ -43,111 +48,85 @@ public class BasicAuthFilter extends OncePerRequestFilter {
     private static final Logger log = LoggerFactory.getLogger(BasicAuthFilter.class);
     private static final String REALM = "cls-news";
 
-    /** 请求属性名：当前请求的角色与用户名。 */
+    /** 请求属性名：当前请求的角色，供 /api/status 回给前端决定要不要显示写操作。 */
     public static final String ROLE_ATTR = "cls.role";
     public static final String USER_ATTR = "cls.user";
 
-    /** 角色取值。前端只认这三个字符串。 */
+    /** 角色取值。前端只认这三个字符串，别在别处硬编码。 */
     public static final String ROLE_RW = "rw";
     public static final String ROLE_GUEST = "guest";
     public static final String ROLE_RO = "ro";
 
     /**
-     * 页面本身放行。
+     * 页面本身必须放行。
      *
-     * <p>移动端内置浏览器（微信 / QQ / UC、Android WebView）遇到 401 + {@code WWW-Authenticate}
-     * 不会弹原生输入框，只渲染一张白页。所以凭证由页面自己收：index.html 只是个空壳，
-     * 数据都在 /api/** 后面。
+     * <p>移动端浏览器（微信、QQ、UC 的内置内核，以及不少 Android WebView）收到
+     * 401 + {@code WWW-Authenticate} 之后**不会弹出原生输入框**，而是直接把 401
+     * 渲染成一张白底页面 —— 电脑上一切正常，同事用手机点开只看到「需要登录」三个字。
      *
-     * <p>{@code /legacy.html} 是旧的手写页面，由 sync-to-jar 在首次覆盖时留底。它同样
-     * 是空壳（资源全部内联），放行才能作为回滚入口直接打开。
+     * <p>所以改成由页面自己收凭证：HTML 先加载出来，登录框做在页面里。
+     * 代价是 index.html 本身免认证就能拿到 —— 它只是个空壳，所有数据都在 /api/** 后面。
+     *
+     * <p>{@code /legacy.html} 也要放行：它是回滚入口，自己白屏就没法回滚了。
      */
     private static final Set<String> PAGE_PATHS = Set.of("/", "/index.html", "/legacy.html");
 
     /**
-     * 前端构建产物的路径前缀。
+     * 换发凭证的端点，必须允许无有效凭证访问。
      *
-     * <p>页面免鉴权只解决了一半问题：uni-app 打包后 JS 与 CSS 是独立的 {@code /assets/*}
-     * 文件，而浏览器加载 {@code <script src>} / {@code <link href>} 时**不会**带
-     * Authorization 头。这些资源一旦要求鉴权，页面就只剩一张白屏 —— 旧页面把所有
-     * CSS/JS 内联进 index.html，所以这个坑直到换成构建产物才暴露。
+     * <p>不放行就死锁：token 过期了想换新的，得先有有效 token。
+     * 放行的前提是这三个端点自己校验 —— {@code /token} 验 Basic 原文，
+     * {@code /refresh} 验一次性 refresh，{@code /logout} 只是删一条记录。
      *
-     * <p>放行是安全的：产物里只有渲染逻辑，不含任何数据，数据全在 /api/** 后面。
+     * <p>限定 POST：GET /api/auth/token 没有意义，不该因为路径匹配被放过去。
      */
-    private static final String ASSET_PREFIX = "/assets/";
+    private static final Set<String> AUTH_ENDPOINTS = Set.of("/api/auth/token", "/api/auth/refresh", "/api/auth/logout");
 
-    /** 只读账号也不给看的路径：访客明细含所有人的 IP 和 UA，聚合数可以给。 */
+    /**
+     * 只读账号也不给看的路径。
+     *
+     * <p>{@code /api/visits/logs} 是唯一一处：它是给运维排查用的明细，含每个人的
+     * IP、UA、设备指纹。聚合数字（/api/visits）给只读角色看没问题，明细不行。
+     */
     private static final Set<String> READ_ONLY_DENY = Set.of("/api/visits/logs");
 
-    /** 游客不给看的路径：整个访客模块，连聚合数都不给。 */
+    /**
+     * 游客账号不给看的路径：整个访客模块。
+     *
+     * <p>比只读账号更严 —— 连聚合数字都不给。演示的用途是看「这条新闻模型怎么判」，
+     * 而「今天有多少人在用、累计多少访客」是站主的运营数据，跟演示无关。
+     */
     private static final Set<String> GUEST_DENY = Set.of("/api/visits", "/api/visits/logs");
 
-    /** 只读账号唯一允许的非 GET：访客上报没有副作用，禁掉会让统计失真。 */
+    /**
+     * 只读账号唯一允许的非 GET 请求。
+     *
+     * <p>{@code POST /api/visit/ping} 是访客上报，没有业务副作用，只往统计表里记一笔。
+     * 禁掉它，只读账号的访问就不会被计入统计，页面上的「今日访客」会失真。
+     */
     private static final Set<String> READ_ONLY_POST = Set.of("/api/visit/ping");
 
-    /** 游客唯一允许的写路径。用正则而不是 startsWith，避免路径拼接绕过。 */
+    /**
+     * 游客账号唯一允许的写路径：单条分析。
+     *
+     * <p>用正则而不是 {@code startsWith}：{@code /api/news/1/analyze/../x} 这类拼接
+     * 在不同的容器/版本上规范化时机不一致，就不给它留判断空间。
+     */
     private static final Pattern ANALYZE_PATH = Pattern.compile("^/api/news/\\d+/analyze$");
 
-    /** 一个账号：user 后面跟冒号再接 password，比较的是整段字节，避免分开比泄露长度。 */
-    private record Account(byte[] secret, String role) { }
+    /** 前端构建产物，浏览器加载时不会带任何凭证头。 */
+    private static final String ASSET_PREFIX = "/assets/";
 
-    private final Map<String, Account> accounts;
+    private final AccountStore accounts;
+    private final TokenStore tokens;
     private final Set<String> permitPaths;
 
-    public BasicAuthFilter(AppProps props) {
-        AppProps.Security cfg = props.getSecurity();
-        String user = cfg.getUsername() == null ? "" : cfg.getUsername().trim();
-        String pass = cfg.getPassword() == null ? "" : cfg.getPassword();
-
-        if (user.isBlank() || pass.isBlank()) {
-            throw new IllegalStateException("""
-                    已开启 app.security.enabled=true，但用户名或密码为空。
-                    请设置环境变量 APP_USER / APP_PASSWORD（或 app.security.username/password）。
-                    这里故意让启动失败：空密码的「已开启鉴权」比明说没开更危险。""");
-        }
-
-        Map<String, Account> map = new LinkedHashMap<>();
-        map.put(user, new Account((user + ":" + pass).getBytes(StandardCharsets.UTF_8), ROLE_RW));
-
-        addList(map, cfg.getGuest(), ROLE_GUEST, "游客");
-        addList(map, cfg.getReadOnly(), ROLE_RO, "只读");
-
-        this.accounts = Map.copyOf(map);
-        this.permitPaths = Set.of(cfg.getPermitPaths() == null ? new String[]{"/healthz"} : cfg.getPermitPaths());
-        // 打印用户名而不是数量：账号配错（重名、漏写变量）时一眼就能看出来
-        log.info("已开启访问控制：可写 {}，游客 {}，只读 {}，放行路径 {}",
-                user, namesOf(map, ROLE_GUEST), namesOf(map, ROLE_RO), permitPaths);
-    }
-
-    private static List<String> namesOf(Map<String, Account> map, String role) {
-        return map.entrySet().stream()
-                .filter(e -> role.equals(e.getValue().role()))
-                .map(Map.Entry::getKey)
-                .toList();
-    }
-
-    /** 解析 {@code user:pass,user2:pass2} 加入表。格式错的打 warn 跳过，不静默生效。 */
-    private void addList(Map<String, Account> map, String raw, String role, String label) {
-        if (raw == null || raw.isBlank()) {
-            return;
-        }
-        for (String entry : raw.split(",")) {
-            String e = entry.trim();
-            if (e.isEmpty()) continue;
-            int idx = e.indexOf(':');
-            if (idx <= 0 || idx == e.length() - 1) {
-                log.warn("忽略格式错误的{}账号（应为 user:pass）: {}", label, e);
-                continue;
-            }
-            String u = e.substring(0, idx).trim();
-            String p = e.substring(idx + 1);
-            if (map.containsKey(u)) {
-                // 同名不覆盖：先到先得，避免手误把已有账号降级
-                log.warn("{}账号 {} 与已有账号重名，已忽略", label, u);
-                continue;
-            }
-            map.put(u, new Account((u + ":" + p).getBytes(StandardCharsets.UTF_8), role));
-        }
+    public BasicAuthFilter(AppProps props, AccountStore accounts, TokenStore tokens) {
+        this.accounts = accounts;
+        this.tokens = tokens;
+        this.permitPaths = Set.of(props.getSecurity().getPermitPaths() == null
+                ? new String[]{"/healthz"} : props.getSecurity().getPermitPaths());
+        log.info("放行路径 {}，换发凭证端点 {}", permitPaths, AUTH_ENDPOINTS);
     }
 
     @Override
@@ -160,25 +139,45 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         // /healthz/../api/status 会因为前缀是 /healthz 而被放行，然后交给下游做路径规范化——
         // 能不能挡住完全取决于 Tomcat 的实现，等于把安全交给别人的默认值。
         // 另外显式拒绝带 .. 或 // 的请求：规范化时机在不同容器/版本上不一致，不赌。
-        if ((permitPaths.contains(uri) || PAGE_PATHS.contains(uri) || isPublicAsset(uri))
+        if ((permitPaths.contains(uri) || PAGE_PATHS.contains(uri)
+                || isPublicAsset(uri) || isAuthEndpoint(req, uri))
                 && !looksLikeTraversal(uri)) {
             chain.doFilter(req, resp);
             return;
         }
 
         String header = req.getHeader("Authorization");
+
+        // Bearer 先判：日常请求都走这条，Basic 只在换令牌和 curl 时出现
+        if (header != null && header.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            TokenStore.Principal p = tokens.resolveAccess(header.substring(7).trim());
+            if (p != null) {
+                if (!allowed(req, uri, p.role())) {
+                    deny(resp, p.role());
+                    return;
+                }
+                req.setAttribute(ROLE_ATTR, p.role());
+                req.setAttribute(USER_ATTR, p.user());
+                chain.doFilter(req, resp);
+                return;
+            }
+            // token 无效直接 401，不落到下面的 Basic 分支：
+            // 带着过期 token 的请求再回头试 Basic 没有意义，前端拿到 401 会自己刷新。
+            unauthorized(req, resp, uri);
+            return;
+        }
+
         if (header != null && header.regionMatches(true, 0, "Basic ", 0, 6)) {
             try {
                 byte[] got = Base64.getDecoder().decode(header.substring(6).trim());
-                Account acct = match(got);
+                AccountStore.Account acct = accounts.verifyBasic(got);
                 if (acct != null) {
-                    String role = acct.role();
-                    if (!allowed(req, uri, role)) {
-                        deny(resp, role);
+                    if (!allowed(req, uri, acct.role())) {
+                        deny(resp, acct.role());
                         return;
                     }
-                    req.setAttribute(ROLE_ATTR, role);
-                    req.setAttribute(USER_ATTR, userOf(got));
+                    req.setAttribute(ROLE_ATTR, acct.role());
+                    req.setAttribute(USER_ATTR, acct.user());
                     chain.doFilter(req, resp);
                     return;
                 }
@@ -187,6 +186,14 @@ public class BasicAuthFilter extends OncePerRequestFilter {
             }
         }
 
+        unauthorized(req, resp, uri);
+    }
+
+    private static boolean isAuthEndpoint(HttpServletRequest req, String uri) {
+        return AUTH_ENDPOINTS.contains(uri) && "POST".equals(req.getMethod());
+    }
+
+    private void unauthorized(HttpServletRequest req, HttpServletResponse resp, String uri) throws IOException {
         resp.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         // 只给非 API 请求发 challenge：否则 Safari 会在页内登录层之上再弹一个原生框，
         // 输完还关不掉。
@@ -195,34 +202,6 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         }
         resp.setContentType("text/plain;charset=UTF-8");
         resp.getWriter().write("需要登录");
-    }
-
-    /**
-     * 按用户名取账号，再对整段 {@code user:pass} 做常量时间比较。
-     *
-     * <p>用户名本身不是秘密（登录框里看得见），所以按名字查表不构成额外泄露；
-     * 真正不能按字节短路比较的是密码，所以比较放在 {@link MessageDigest#isEqual}。
-     */
-    private Account match(byte[] got) {
-        int colon = -1;
-        for (int i = 0; i < got.length; i++) {
-            if (got[i] == ':') { colon = i; break; }
-        }
-        if (colon <= 0) return null;
-        String user = new String(got, 0, colon, StandardCharsets.UTF_8);
-        Account acct = accounts.get(user);
-        if (acct == null) return null;
-        return MessageDigest.isEqual(got, acct.secret()) ? acct : null;
-    }
-
-    /** 从已经比对通过的 {@code user:pass} 里取出用户名，只用于日志和排查。 */
-    private static String userOf(byte[] got) {
-        for (int i = 0; i < got.length; i++) {
-            if (got[i] == ':') {
-                return new String(got, 0, i, StandardCharsets.UTF_8);
-            }
-        }
-        return "";
     }
 
     /** 按角色判断这个请求能不能过。三种角色的差别全收在这一个方法里。 */
@@ -237,10 +216,11 @@ public class BasicAuthFilter extends OncePerRequestFilter {
     }
 
     /**
-     * 游客：GET 放行（访客模块除外），写只允许单条分析。
+     * 游客账号：GET 全放行（访客模块除外），写操作只允许单条分析。
      *
-     * <p>{@code force=true} 单独拒掉：它是运维改完 prompt 后强制重算的入口，
-     * 游客点一次就是重复烧一次钱。
+     * <p>{@code force=true} 单独拒掉：它会无视「结果还新鲜」的保护直接重算，
+     * 一模一样的问题再问一遍模型，答案基本不变，但钱是真花了一次。
+     * 那个入口本来就只给运维改完 prompt 后重算用。
      */
     private boolean allowedForGuest(HttpServletRequest req, String uri) {
         if (GUEST_DENY.contains(uri)) return false;
@@ -261,7 +241,12 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         return "POST".equals(m) && READ_ONLY_POST.contains(uri);
     }
 
-    /** 403 文案按角色分开：游客看到「只读账号」会以为配置错了，他其实有分析权限。 */
+    /**
+     * 拒绝时把原因说清楚。
+     *
+     * <p>三档角色用的是同一个 403，但文案分开写：游客看到「只读账号」会以为是配置错了，
+     * 而他其实有分析权限，只是这一条路径不在范围内。
+     */
     private void deny(HttpServletResponse resp, String role) throws IOException {
         resp.setStatus(HttpServletResponse.SC_FORBIDDEN);
         resp.setContentType("text/plain;charset=UTF-8");
@@ -271,13 +256,18 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         resp.getWriter().write(msg);
     }
 
-    /** 白名单路径里带 .. / // / ; 一律不放行，交给鉴权流程处理。 */
+    /** 白名单路径里出现穿越/重复斜杠一律不放行，交给鉴权流程处理。 */
     private boolean looksLikeTraversal(String uri) {
         return uri.contains("..") || uri.contains("//") || uri.contains(";");
     }
 
     /**
      * 是否是可以匿名取的前端资源。
+     *
+     * <p>浏览器加载 {@code <script src>} / {@code <link href>} 时**不会**带 Authorization 头，
+     * 所以不放行的话，页面能下载但一行 JS 都执行不了 —— 表现是整页白屏。
+     * 旧版把 CSS/JS 全部内联在 index.html 里，从来没有独立资源请求，这个洞直到换成
+     * 构建产物（2026-11-22）才暴露。
      *
      * <p>除了前缀与路径穿越检查，还把字符限制在构建产物实际会用到的集合（字母数字与
      * {@code . _ - /}）。出现 {@code %} 或 {@code \} 说明是编码过的绕行尝试

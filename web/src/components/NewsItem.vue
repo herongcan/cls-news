@@ -49,6 +49,29 @@ function openQuote(code?: string): void {
   uni.setClipboardData({ data: code })
   // #endif
 }
+
+/**
+ * 点正文打开财联社原文。
+ *
+ * <p>这条跳转是旧页面本来的行为（整段正文包在 {@code <a href>} 里），uni 版重写时
+ * 只搬了股票 chip 的行情跳转，把正文链接整个漏了 —— 表现就是「点了没反应」。
+ *
+ * <p>小程序里不能直接开外链：需要 web-view 组件，而 web-view 又要求业务域名备案
+ * （这个域名还没备案）。所以退化成复制链接，至少能让人自己粘到浏览器。
+ */
+function openSource(): void {
+  const url = props.item.url
+  if (!url) return
+  // #ifdef H5
+  window.open(url, '_blank', 'noopener,noreferrer')
+  // #endif
+  // #ifndef H5
+  uni.setClipboardData({
+    data: url,
+    success: () => uni.showToast({ title: '原文链接已复制', icon: 'none' })
+  })
+  // #endif
+}
 </script>
 
 <template>
@@ -61,7 +84,7 @@ function openQuote(code?: string): void {
     </view>
 
     <view class="body">
-      <text class="txt">
+      <text class="txt" :class="{ src: !!item.url }" @tap="openSource">
         <text v-for="(seg, i) in segments" :key="i" :class="{ hit: seg.hit }">{{ seg.t }}</text>
       </text>
 
@@ -70,7 +93,7 @@ function openQuote(code?: string): void {
           v-for="(s, i) in stocks"
           :key="i"
           class="chip"
-          @tap="openQuote(s.code)"
+          @tap.stop="openQuote(s.code)"
         >{{ s.name }}<text v-if="s.code" class="code">{{ s.code }}</text></text>
       </view>
 
@@ -94,7 +117,7 @@ function openQuote(code?: string): void {
           v-else-if="canAnalyze"
           class="act"
           :class="{ busy: analyzing || item.analysisStatus === 'analyzing', err: item.analysisStatus === 'failed' }"
-          @tap="emit('analyze')"
+          @tap.stop="emit('analyze')"
         >
           <text v-if="analyzing || item.analysisStatus === 'analyzing'" class="spinner" />
           <text>{{ actionLabel }}</text>
@@ -164,6 +187,13 @@ function openQuote(code?: string): void {
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* 有原文链接时给一点可点的暗示。移动端没有 hover，靠点下去的回弹区分 */
+.txt.src {
+  cursor: pointer;
+}
+.txt.src:active {
+  opacity: 0.62;
 }
 .hit {
   background: var(--mark-bg);

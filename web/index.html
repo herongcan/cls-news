@@ -3,7 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>实时资讯聚合与分析助手</title>
+    <!--
+      构建产物里的 <title> 由 manifest.json 的 h5.title 覆盖，改这里不生效。
+      这里写同一个值只是为了打开源文件时看到的是真实的站点名，别把时间花在改它上面。
+      登录层那一屏叫「实时资讯聚合与分析助手」，是运行时由 index.vue 的 syncTitle() 切的。
+    -->
+    <title>实时资讯助手</title>
   </head>
   <body>
     <div id="app"><!--app-html--></div>

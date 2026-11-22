@@ -79,6 +79,17 @@ public class AppProps {
          */
         private boolean trustForwardedHeaders = false;
 
+        /**
+         * access token 有效期。短一点：它才是最常出现在请求头里的东西，
+         * 泄露后的暴露窗口就是这个值。
+         */
+        private java.time.Duration tokenAccessTtl = java.time.Duration.ofMinutes(30);
+        /**
+         * refresh token 有效期。用户多久不用就要重新输密码，由它决定。
+         * 7 天是折中：足够撑过一次假期，又不至于让一台借出去的手机永久持有登录态。
+         */
+        private java.time.Duration tokenRefreshTtl = java.time.Duration.ofDays(7);
+
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getUsername() { return username; }
@@ -95,6 +106,10 @@ public class AppProps {
         public void setGuestDailyCap(int guestDailyCap) { this.guestDailyCap = guestDailyCap; }
         public boolean isTrustForwardedHeaders() { return trustForwardedHeaders; }
         public void setTrustForwardedHeaders(boolean v) { this.trustForwardedHeaders = v; }
+        public java.time.Duration getTokenAccessTtl() { return tokenAccessTtl; }
+        public void setTokenAccessTtl(java.time.Duration d) { this.tokenAccessTtl = d; }
+        public java.time.Duration getTokenRefreshTtl() { return tokenRefreshTtl; }
+        public void setTokenRefreshTtl(java.time.Duration d) { this.tokenRefreshTtl = d; }
     }
 
     public static class Display {

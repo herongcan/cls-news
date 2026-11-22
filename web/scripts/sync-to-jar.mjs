@@ -37,6 +37,11 @@ async function main() {
     }
   }
 
+  // 先清掉上一次的 assets。文件名叫 index-<hash>.js，每次构建都会换名字，
+  // 不清的话旧产物会一直留在 jar 里（越攒越大），而且 CI 里 `ls assets/*.js | head -1`
+  // 取到的是哪一代全看文件名排序 —— 断言就会拿一个早就没被引用的文件去验。
+  await rm(join(target, 'assets'), { recursive: true, force: true })
+
   for (const entry of await readdir(src)) {
     await cp(join(src, entry), join(target, entry), { recursive: true, force: true })
   }

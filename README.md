@@ -91,7 +91,7 @@ docker compose up -d                  # 默认只绑 127.0.0.1，端口 HOST_POR
 | POST | `/api/analysis/retry-failed` | 把 `failed` 全部打回 `pending` 重跑 |
 | GET | `/api/status` | 抓取状态、总数、分析进度与 token 用量、上次错误、`analysisReady`、当前账号的 `role`（`rw` / `ro`） |
 | POST | `/api/visit/ping` | 前端每次进页面调一次，记访客（聚合 + 明细） |
-| GET | `/api/visits` | 访客聚合：今日/累计人数、按 vid 去重的今日人数、设备与小时分布、近 N 天 |
+| GET | `/api/visits` | 访客聚合：今日/累计人数（按设备标识去重）、设备与小时分布、近 N 天 |
 | GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv`。**游客与只读账号访问返回 403** |
 
 `/api/news` 的响应里带 `stats`，页面只发一个请求就能同时更新列表和状态栏。
@@ -125,8 +125,12 @@ curl -u "$A" "$H/api/visits/logs?format=csv" -o visits.csv   # 导出，字段�
 
 - **明细不是每次打开页面一行。** 同一 IP 60 秒内只落一行（`AccessLogStore` 里的内存限流），
   否则连按 F5 二十次就是二十行，"访问次数"退化成"刷新频率"。
-- **`vid` 为空时 UV 退回按 IP 算**（`COALESCE(NULLIF(vid,''), ip)`），所以 `total` 是行数不是人数，
-  人数看 `/api/visits` 的 `todayByVid`。
+- **人数看 `/api/visits` 的 `today` / `total`，不要拿明细的 `total` 当人数。** 明细的
+  `total` 是行数（且有 60 秒限流）；人数走 `visitor` 表，按「设备标识 + 自然日」去重。
+  同一张出口 IP 下的两个人，vid 不同就算两个 —— 这正是它比 IP 口径准的地方。
+  `todayByVid` 是拿明细表另算一遍做交叉验证，正常和 `today` 相等或差一两个。
+- **`vid` 为空时退回按 IP 算。** 无痕模式、清过缓存、老客户端都拿不到 vid，
+  这时 `k` 会存成 `ip:...`，不会所有匿名访问被并成一个人。
 - **这个接口会返回同事的 IP。** 密码是共用的，谁拿到密码谁就能看全部明细 ——
   自用工具可接受，但别把它开给外部，也别在没上 HTTPS 的时候用（Basic 是明文 Base64）。
 
@@ -521,7 +525,7 @@ src/main/java/com/herc/clsnews/
 ├── model/                       News / NewsView / RawItem
 ├── store/
 │   ├── NewsStore.java           新闻：列表、增量、翻页、搜索、分析状态
-│   ├── VisitStore.java          访客：IP + 自然日去重的聚合口径
+│   ├── VisitStore.java          访客：设备标识 + 自然日去重的聚合口径（含旧 IP 表迁移）
 │   └── AccessLogStore.java      访客：明细写入 + 60 秒限流 + 设备/小时分布 + 明细查询
 ├── job/
 │   ├── IngestJob.java           抓取调度（间隔 app.interval-ms）

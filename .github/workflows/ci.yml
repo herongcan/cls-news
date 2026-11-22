@@ -200,6 +200,48 @@ jobs:
           assert_blocked '/assets/..%2fapi/status'            --path-as-is "$BASE/assets/..%2fapi/status"
           assert_blocked '/healthz/../api/status'             --path-as-is "$BASE/healthz/../api/status"
 
+          echo "--- 令牌换发（Basic 只用于这一步）---"
+          TOK=$(curl -s -X POST -u 'admin:admin' "$BASE/api/auth/token")
+          A1=$(echo "$TOK" | jq -r '.accessToken')
+          R1=$(echo "$TOK" | jq -r '.refreshToken')
+          if [ -z "${A1:-}" ] || [ "$A1" = "null" ]; then
+            echo "::error::换令牌失败：$TOK"; fail=1
+          fi
+          assert 200 'Bearer 访问 /api/status'          -H "Authorization: Bearer $A1" "$BASE/api/status"
+          assert 401 '伪造 Bearer'                       -H 'Authorization: Bearer 乱写的' "$BASE/api/status"
+          assert 401 '错误密码换令牌'                    -X POST -u 'admin:错的' "$BASE/api/auth/token"
+          # 不带凭证时过滤器先拦（只对 POST 放行这三个端点），所以是 401；
+          # 带上 Basic 才轮到 Spring 的映射层回「方法不允许」405。
+          # 两者都拿不到令牌，但断言要写实际值 —— 写成同一条只会有一条永远红着。
+          assert 401 'GET /api/auth/token（无凭证）'     "$BASE/api/auth/token"
+          assert 405 'GET /api/auth/token（带 Basic）'   -u 'admin:admin' "$BASE/api/auth/token"
+
+          echo "--- 刷新旋转 ---"
+          TOK2=$(curl -s -X POST -H 'Content-Type: application/json' \
+                 -d "{\"refreshToken\":\"$R1\"}" "$BASE/api/auth/refresh")
+          A2=$(echo "$TOK2" | jq -r '.accessToken')
+          R2=$(echo "$TOK2" | jq -r '.refreshToken')
+          if [ -z "${A2:-}" ] || [ "$A2" = "null" ]; then
+            echo "::error::刷新令牌失败：$TOK2"; fail=1
+          fi
+          assert 200 '刷新后的新 access 可用'            -H "Authorization: Bearer $A2" "$BASE/api/status"
+          # refresh 一次性使用：旧的那个再换必须失败，否则「旋转」等于没做
+          assert 401 '旧 refresh 再用一次'               -X POST -H 'Content-Type: application/json' \
+                 -d "{\"refreshToken\":\"$R1\"}" "$BASE/api/auth/refresh"
+
+          echo "--- 登出必须真的登出 ---"
+          # 这条是回归来的：最初只删 refresh，access 还能再用满一个 TTL，
+          # 表现是「点了退出，但复制出来的 curl 还能通」。
+          assert 200 '登出'                              -X POST -H 'Content-Type: application/json' \
+                 -d "{\"refreshToken\":\"$R2\"}" "$BASE/api/auth/logout"
+          assert 401 '登出后 access 立刻失效'            -H "Authorization: Bearer $A2" "$BASE/api/status"
+          assert 401 '登出后 refresh 立刻失效'           -X POST -H 'Content-Type: application/json' \
+                 -d "{\"refreshToken\":\"$R2\"}" "$BASE/api/auth/refresh"
+          # 按 session 作废，不是按账号：另开一次登录不能被牵连
+          TOK3=$(curl -s -X POST -u 'admin:admin' "$BASE/api/auth/token")
+          A3=$(echo "$TOK3" | jq -r '.accessToken')
+          assert 200 '另一次登录不受登出影响'            -H "Authorization: Bearer $A3" "$BASE/api/status"
+
           echo "--- 角色能力差异 ---"
           role=$(curl -s -u 'admin:admin' "$BASE/api/status" | jq -r '.role')
           [ "$role" = "rw" ] || { echo "::error::admin 的角色是 $role，期望 rw"; fail=1; }

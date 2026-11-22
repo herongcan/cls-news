@@ -17,7 +17,7 @@
 ```
 src/
 ├── api/              接口层，纯 TS，不碰任何 DOM / uni 页面 API
-│   ├── http.ts       uni.request 封装：统一带 Basic 头、错误归一
+│   ├── http.ts       uni.request 封装：自动带 Bearer、401 续期重放、错误归一
 │   ├── credentials.ts 凭证存取（H5 落 localStorage，小程序落 Storage）
 │   ├── news.ts       9 个接口里用到的 6 个
 │   └── types.ts      与后端 NewsView / Stats 一一对应的类型
@@ -84,11 +84,10 @@ npm run build:mp        # 产物在 dist/build/mp-weixin
 
 - 老页面还在 `src/main/resources/static/index.html`，`npm run sync:jar` 才会被替换成这里构建的产物（旧页面挪成 `legacy.html`）。**替换前需要确认**，因为那是当前线上跑的版本。
 - 微信小程序的合法域名问题（见上一节），域名备案没解决之前只有 H5 能对外用。
-- 短期票据 `/api/auth/token` 未做，凭证仍明文存本地。
 
 ## 几个刻意的取舍
 
 - **hash 路由**：产物由 Spring Boot 静态托管，没有服务端 rewrite，`history` 模式一刷新就 404。hash 模式在 jar 里是零配置的。
 - **不引 UI 组件库**：整页就一个列表 + 一个登录框，自己写 200 行 CSS 比塞一个 300KB 的组件库更快也更可控。
 - **关键词高亮不用 `v-html`**：小程序里 `v-html` 只能落 `rich-text`，`<mark>` 不在支持列表内。改成把正文切成「命中 / 未命中」片段，模板渲染 `<text>`，两端一致且没有注入面。
-- **凭证仍是明文**：后端是 Basic Auth + 内存账号表，没有 Session。短期票据（`/api/auth/token`）要后端配合，放在二期。
+- **本地只存令牌，不存密码**：登录时用 Basic 换一对令牌（`/api/auth/token`），之后每个请求只带 Bearer；access 30 分钟、refresh 7 天且一次性旋转，401 会自动续期并重放。后端仍保留 Basic 直连，给 `curl -u` 排查用。

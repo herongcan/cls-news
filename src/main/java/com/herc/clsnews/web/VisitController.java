@@ -55,11 +55,14 @@ public class VisitController {
         boolean trustForwarded = props.getSecurity().isTrustForwardedHeaders();
         String ip = ClientIp.of(req, trustForwarded);
         String day = LocalDate.now(ZoneId.systemDefault()).toString();
+        // vid 只清洗一次，两张表用同一个值：聚合按它去重，明细按它留档。
+        // 各洗各的会出现「明细里有这个人、聚合里没算」的对不上账。
+        String vid = AccessLogStore.cleanVid(body == null ? null : body.vid());
         try {
-            // 聚合口径（IP + 自然日去重）保持原样，页面顶栏那两个数字的含义不变
-            visits.record(ip, day);
+            // 聚合口径：设备标识 + 自然日去重（拿不到 vid 时退回 IP）
+            visits.record(ip, vid, day);
             // 明细口径：带设备、UA、vid，有 60 秒限流
-            access.record(ip, body == null ? null : body.vid(),
+            access.record(ip, vid,
                     req.getHeader("User-Agent"), "/", req.getHeader("Referer"));
         } catch (Exception e) {
             log.warn("访客上报失败：{}", e.getMessage());

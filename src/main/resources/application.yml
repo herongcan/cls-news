@@ -92,6 +92,10 @@ app:
     # false：只用 TCP 对端地址，防止客户端伪造。
     # 前面有反向代理 / 隧道时必须 true，否则所有访客算成同一个 IP。
     trust-forwarded-headers: ${APP_TRUST_XFF:false}
+    # 令牌有效期。access 短（它才是每个请求都带的东西），refresh 长（决定多久要重新输密码）。
+    # 令牌存内存，容器重启后全部失效，前端会自动回到登录层。
+    token-access-ttl: ${APP_TOKEN_ACCESS_TTL:30m}
+    token-refresh-ttl: ${APP_TOKEN_REFRESH_TTL:7d}
 
 logging:
   level:

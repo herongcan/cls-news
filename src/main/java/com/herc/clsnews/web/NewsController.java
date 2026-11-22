@@ -279,7 +279,8 @@ public class NewsController {
         body.put("today", visits.countToday(today));
         body.put("total", visits.countTotal());
         body.put("hitsToday", visits.hitsToday(today));
-        // 更准的今日人数：优先按前端 vid 去重，同一出口 IP 下的多个人能分开算
+        // 明细口径的独立算法：拿 access_log 再算一遍今日人数，用来交叉验证聚合表。
+        // 两个数字正常情况下相等或差一两个（明细有 60 秒限流），差很多就是写入出问题了。
         body.put("todayByVid", access.uvOnDay(today));
         body.put("devices", access.deviceStats(today));
         body.put("hours", access.hourHistogram(today));
@@ -438,7 +439,8 @@ public class NewsController {
         s.put("pending", store.countByStatus("pending"));
         // 访客数字只给 rw / ro；游客连聚合数都不给。
         if (!BasicAuthFilter.ROLE_GUEST.equals(role)) {
-            // 访客按 IP + 自然日去重：今日 = 今天来过的不同 IP 数，总 = 历史累计的不同 IP 数
+            // 访客按「设备标识 + 自然日」去重：今日 = 今天来过的不同设备数，
+            // 总 = 历史累计的不同设备数。拿不到 vid 的访问退回按 IP 算。
             String today = LocalDate.now(ZoneId.systemDefault()).toString();
             s.put("visitToday", visits.countToday(today));
             s.put("visitTotal", visits.countTotal());

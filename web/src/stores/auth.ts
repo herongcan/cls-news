@@ -2,11 +2,20 @@ import { defineStore } from 'pinia'
 import {
   clearLegacyBasic,
   clearTokens,
+  readLastUser,
   readLegacyBasic,
   readTokens,
+  rememberUser,
   writeTokens
 } from '@/api/credentials'
-import { ApiError, requestToken, revokeSession } from '@/api/http'
+import {
+  abortWaitingLogin,
+  ApiError,
+  requestToken,
+  resumeAfterLogin,
+  revokeSession,
+  setSessionLostHandler
+} from '@/api/http'
 import { fetchStatus } from '@/api/news'
 import type { Role, Stats } from '@/api/types'
 
@@ -17,6 +26,15 @@ interface AuthState {
   noAuth: boolean
   role: Role
   stats: Stats | null
+  /**
+   * 会话中途失效（refresh 也换不回来）。
+   *
+   * <p>和 {@code logged=false} 的区别是「盖在哪里」：这个为真时页面不切走，
+   * 只在上面盖一层重登浮层，列表和滚动位置都留着。启动时的 401 仍然走全屏登录层。
+   */
+  needLogin: boolean
+  /** 上次登录用的账号，重登框预填。只存账号，不存密码。 */
+  lastUser: string
 }
 
 export const useAuth = defineStore('auth', {
@@ -25,7 +43,9 @@ export const useAuth = defineStore('auth', {
     logged: false,
     noAuth: false,
     role: 'rw',
-    stats: null
+    stats: null,
+    needLogin: false,
+    lastUser: readLastUser()
   }),
 
   getters: {
@@ -39,22 +59,43 @@ export const useAuth = defineStore('auth', {
 
   actions: {
     /**
+     * 页面挂载时调一次：把「会话中途失效」接进 store。
+     *
+     * <p>为什么用回调而不是让 http 直接改 store：http 是纯传输层，
+     * 它不该知道 Pinia 的存在，否则会绕出一个循环依赖（store 又要用 http）。
+     */
+    watchSession(): void {
+      setSessionLostHandler(() => {
+        this.needLogin = true
+        this.lastUser = this.lastUser || this.user
+      })
+    },
+
+    /**
      * 启动时判定走哪条路：
      *   本地有旧版 {u,p} → 先换一次令牌（老用户升级后无感，不用重输密码）；
      *   有令牌 → 带上去验一次，401 且刷新也失败就把本地凭证扔掉回到登录层；
      *   都没有 → 也打一次 /api/status，能通说明服务端没开鉴权（本地开发默认）。
+     *
+     * <p>{@code sync(false)}：启动阶段不挂起。此时界面还停在「正在连接…」，
+     * 重登浮层挂在下面根本看不见，等两分钟等于卡死。
      */
     async boot(): Promise<void> {
       await this.migrateLegacy()
       const t = readTokens()
       this.user = t?.user ?? ''
       try {
-        await this.sync()
+        await this.sync(false)
       } catch (e) {
         if (!(e instanceof ApiError && e.status === 401)) throw e
         clearTokens()
         this.user = ''
         this.logged = false
+        return
+      }
+      if (this.user) {
+        rememberUser(this.user)
+        this.lastUser = this.user
       }
     },
 
@@ -83,8 +124,11 @@ export const useAuth = defineStore('auth', {
       }
     },
 
-    async sync(): Promise<void> {
-      const st = await fetchStatus()
+    /**
+     * @param waitLogin 会话失效时是否挂起等重登，见 {@link fetchStatus}
+     */
+    async sync(waitLogin = true): Promise<void> {
+      const st = await fetchStatus(waitLogin)
       this.role = st.role
       this.stats = st
       this.logged = true
@@ -102,14 +146,53 @@ export const useAuth = defineStore('auth', {
       const t = await requestToken(user, pass)
       writeTokens(t)
       this.user = t.user
+      this.lastUser = t.user
+      rememberUser(t.user)
       try {
-        await this.sync()
+        // sync(false)：这里刚换到令牌，验一次只为拿 role/stats。
+        // 不能挂起 —— 万一这条也 401，默认的 waitLogin 会让人对着
+        // 「验证中…」干等两分钟，看着像登录按钮坏了。
+        await this.sync(false)
       } catch (e) {
         clearTokens()
         this.user = ''
         this.logged = false
         throw e
       }
+    },
+
+    /**
+     * 会话中途失效后的原地重登。
+     *
+     * <p>和 {@link login} 的区别只有两处：成功后额外唤醒 http 层挂着的请求
+     * （它们在等这一下，醒来会带着新令牌重放），以及不重新加载列表 ——
+     * 重放拿回的数据就是断点处该有的数据，重新 load 反而会把滚动位置冲回顶部。
+     *
+     * <p>失败时保留本地状态（不 clearTokens）：登录框还开着，用户可能只是打错一个字，
+     * 让他改完再试；此时本地本来也没有可用令牌。
+     */
+    async relogin(user: string, pass: string): Promise<void> {
+      const t = await requestToken(user, pass)
+      writeTokens(t)
+      this.user = t.user
+      this.lastUser = t.user
+      rememberUser(t.user)
+      // 同上：验证失败要立刻报错让人改，不能挂在那里等 120 秒
+      await this.sync(false)
+      this.needLogin = false
+      resumeAfterLogin()
+    },
+
+    /**
+     * 用户在重登浮层上点「退出登录」。
+     *
+     * 必须先把挂起的请求放掉（按 401 失败），否则它们要悬满两分钟；
+     * 再清本地状态回到全屏登录层。
+     */
+    quitRelogin(): void {
+      this.needLogin = false
+      abortWaitingLogin()
+      this.logout()
     },
 
     /**
@@ -125,6 +208,7 @@ export const useAuth = defineStore('auth', {
       }
       clearTokens()
       clearLegacyBasic()
+      this.needLogin = false
       this.user = ''
       this.logged = false
       this.stats = null

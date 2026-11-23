@@ -1,7 +1,7 @@
 import {
   basicHeader,
   clearTokens,
-  readLegacyBasic,
+  isTokens,
   readTokens,
   writeTokens,
   type Tokens
@@ -31,9 +31,14 @@ type Query = Record<string, string | number | boolean | undefined>
 
 /**
  * 鉴权方式：
- *   auto（默认）—— 有令牌带 Bearer，没有则沿用旧版 Basic（迁移期兜底）
+ *   auto（默认）—— 有令牌带 Bearer，没有就不带
  *   none        —— 不带任何凭证，刷新令牌时必须用它，否则会递归
  *   {basic}     —— 显式用 Basic，只有「换令牌」这一步需要
+ *
+ * <p>曾经 auto 在没有令牌时会回落到旧版 Basic（迁移期兜底）。服务端收掉
+ * 「Basic 直连业务接口」之后这条回落已经没有任何用处 —— 带上密码只会拿到 401，
+ * 而且等于把密码又发了一遍。旧格式的迁移由 auth store 的 migrateLegacy()
+ * 单独走 POST /api/auth/token 完成，那里是唯一还需要 Basic 的地方。
  */
 export type AuthMode = 'auto' | 'none' | { basic: { u: string; p: string } }
 
@@ -61,6 +66,7 @@ function pickMessage(data: unknown, status: number): string {
   if (status === 401) return '登录已过期，请重新登录'
   if (status === 403) return '当前账号没有这个权限'
   if (status === 404) return '接口不存在'
+  if (status === 429) return '登录尝试过于频繁，请稍后再试'
   return '请求失败（HTTP ' + status + '）'
 }
 
@@ -72,17 +78,20 @@ interface RequestInit {
   /** 分析要等模型返回，给足时间；其余用默认值 */
   timeout?: number
   auth?: AuthMode
+  /**
+   * 会话失效时是否挂起等用户重登，默认 true。
+   *
+   * <p>启动校验必须传 false：那会儿页面还停在「正在连接…」，登录层根本没渲染出来，
+   * 挂住只会让人对着转圈等满两分钟。启动阶段要的是「立刻 401 → 渲染登录层」。
+   */
+  waitLogin?: boolean
 }
 
 function authHeader(mode: AuthMode = 'auto'): string | null {
   if (mode === 'none') return null
   if (typeof mode === 'object') return basicHeader(mode.basic.u, mode.basic.p)
   const t = readTokens()
-  if (t) return 'Bearer ' + t.accessToken
-  // 迁移期兜底：本地还是旧版 {u,p} 时，先用 Basic 把请求打通，
-  // 等 boot() 换到令牌之后就一直走 Bearer。
-  const legacy = readLegacyBasic()
-  return legacy ? basicHeader(legacy.u, legacy.p) : null
+  return t ? 'Bearer ' + t.accessToken : null
 }
 
 /** 只负责发一次请求，不带任何重试逻辑。 */
@@ -121,12 +130,24 @@ function send<T>(path: string, init: RequestInit): Promise<T> {
  * 另外两个会拿到 401，用户看到的现象是「刚登录又被踢出去」。
  * 加锁之后三个请求等同一个刷新结果，各自重放一次。
  */
-let refreshing: Promise<boolean> | null = null
+let refreshing: Promise<RefreshResult> | null = null
 
-function tryRefresh(): Promise<boolean> {
+/**
+ * 一次刷新的三种结局。**必须分开**，因为它们的后续处理完全不同：
+ *   ok        —— 换到了新令牌，重放请求
+ *   dead      —— 服务端明确说这个 refresh 不认（401），只能重登
+ *   transient —— 超时、断网、5xx、回了 200 但不是令牌形状；凭证还是好的，别动它
+ *
+ * <p>以前只有 true/false 两种，`.catch(() => false)` 把「网抖了一下」和
+ * 「会话真的死了」当成一回事 —— 于是任何一次刷新超时都会 clearTokens() +
+ * 弹重登框。用户什么都没做错，只是网差了一秒，却要重新输密码。
+ */
+type RefreshResult = 'ok' | 'dead' | 'transient'
+
+function tryRefresh(): Promise<RefreshResult> {
   if (refreshing) return refreshing
   const t = readTokens()
-  if (!t) return Promise.resolve(false)
+  if (!t) return Promise.resolve('dead')
 
   const p = send<Tokens>('/api/auth/refresh', {
     method: 'POST',
@@ -135,16 +156,105 @@ function tryRefresh(): Promise<boolean> {
     timeout: 8000
   })
     .then((next) => {
+      // 形状不对就不写，见 isTokens 上的说明：写坏比不写更糟
+      if (!isTokens(next)) return 'transient' as const
       writeTokens(next)
-      return true
+      return 'ok' as const
     })
-    .catch(() => false)
+    .catch((e) => {
+      // 只有 401 才算「会话真的没了」。其余（0=网络层、5xx、超时）都当临时故障
+      return e instanceof ApiError && e.status === 401 ? ('dead' as const) : ('transient' as const)
+    })
     .finally(() => {
       refreshing = null
     })
 
   refreshing = p
   return p
+}
+
+/**
+ * 刷新也换不回来之后：本地凭证彻底不可用，需要人来重新登录。
+ *
+ * 三种做法，各有代价：
+ *   1. 直接抛 401 让页面自己弹框 —— 简单，但轮询还在跑，每 30 秒 401 一次，
+ *      用户看到的是「点一下重试」和一串控制台红字，点多少次都不会成功。
+ *   2. 清空列表切回登录页 —— 状态干净，但正在看的位置和翻到第几页全丢了。
+ *   3. 把请求挂住，等用户原地登录完再自动重放 —— 体验最好，代价是请求可能悬着，
+ *      所以必须有个上限。
+ *
+ * 这里选 3：所有同时失效的请求挂在同一个 Promise 上，登录成功后一起唤醒重放；
+ * 用户点「退出登录」或者两分钟没动，统一按 401 失败。
+ */
+const LOGIN_WAIT_MS = 120_000
+
+type SessionLostHandler = () => void
+
+let sessionLostHandler: SessionLostHandler | null = null
+/** 多个请求同时失效时只通知一次，别叠出好几层登录框 */
+let lostNotified = false
+
+interface Waiter {
+  resolve: () => void
+  reject: (e: unknown) => void
+}
+
+let waiter: Waiter | null = null
+let waiting: Promise<void> | null = null
+
+/** 由 auth store 注册：会话失效时把界面切到「原地重登」浮层 */
+export function setSessionLostHandler(fn: SessionLostHandler | null): void {
+  sessionLostHandler = fn
+}
+
+/** 登录成功：唤醒所有挂起的请求，让它们带着新令牌重放 */
+export function resumeAfterLogin(): void {
+  lostNotified = false
+  const w = waiter
+  waiter = null
+  waiting = null
+  w?.resolve()
+}
+
+/** 用户放弃重登：挂起的请求按 401 失败，不要一直悬着占内存 */
+export function abortWaitingLogin(): void {
+  lostNotified = false
+  const w = waiter
+  waiter = null
+  waiting = null
+  w?.reject(new ApiError('登录已过期，请重新登录', 401))
+}
+
+function notifySessionLost(): void {
+  if (lostNotified) return
+  lostNotified = true
+  try {
+    sessionLostHandler?.()
+  } catch (e) {
+    // 界面回调出错不能反过来把请求链带崩
+  }
+}
+
+function waitForLogin(): Promise<void> {
+  if (waiting) return waiting
+  waiting = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      waiter = null
+      waiting = null
+      reject(new ApiError('登录已过期，请重新登录', 401))
+    }, LOGIN_WAIT_MS)
+    waiter = {
+      resolve: () => {
+        clearTimeout(timer)
+        resolve()
+      },
+      reject: (e) => {
+        clearTimeout(timer)
+        reject(e)
+      }
+    }
+  })
+  return waiting
 }
 
 export function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -163,17 +273,41 @@ async function requestInner<T>(path: string, init: RequestInit, retried: boolean
     }
   }
 
+  // 记下这次真正带出去的凭证。401 之后如果它变了，说明另一个标签已经刷新成功并写入，
+  // 那这次 401 只是「我来晚了」，不该把自己连带登出。
+  const sent = mode === 'auto' ? authHeader('auto') : null
+
   try {
     return await send<T>(path, init)
   } catch (e) {
     const expired = e instanceof ApiError && e.status === 401
     if (!expired || retried || mode !== 'auto') throw e
 
-    const ok = await tryRefresh()
-    if (!ok) {
-      // refresh 也失效了（7 天到期，或服务重启过）。清掉本地凭证，
-      // 让上层把界面切回登录层，而不是一直重试。
-      clearTokens()
+    // 这次带出去的压根不是令牌（本地那份被另一个标签/浏览器清理删掉过）。
+    // 现在手里有就说明只是「发得太早」，直接重放，别当成会话失效。
+    if (!sent && readTokens()) return requestInner<T>(path, init, true)
+
+    const r = await tryRefresh()
+    if (r === 'ok') return requestInner<T>(path, init, true)
+
+    // 超时/断网/5xx：凭证还是好的，这次按失败返回就行。
+    // 清掉本地凭证是最糟的处理 —— 用户只是网差了一秒，回来却要重输密码。
+    if (r === 'transient') throw e
+
+    const fresh = authHeader('auto')
+    if (fresh && fresh !== sent) {
+      return requestInner<T>(path, init, true)
+    }
+
+    // refresh 也被服务端明确拒了：7 天到期、被登出，或者服务端换了数据库。
+    // 清掉本地凭证，让界面弹出重登浮层；请求先挂住，登录成功后原地重放 ——
+    // 这样列表、滚动位置都还在，用户不用重新找刚才看到哪一条。
+    clearTokens()
+    if (init.waitLogin === false) throw e
+    notifySessionLost()
+    try {
+      await waitForLogin()
+    } catch {
       throw e
     }
     return requestInner<T>(path, init, true)

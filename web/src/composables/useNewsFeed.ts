@@ -57,6 +57,8 @@ export function useNewsFeed() {
   let requestSeq = 0
   let timer: ReturnType<typeof setInterval> | null = null
   let visible = true
+  /** 增量请求是否在飞（见 pullNewer 里的说明） */
+  let pulling = false
 
   const cursor = computed(() => (items.value.length ? items.value[items.value.length - 1].id : 0))
 
@@ -166,11 +168,16 @@ export function useNewsFeed() {
     // 边追边提交会留下一个更隐蔽的丢条口子：第三轮网络断了，
     // 游标已经推进到第二轮的末尾，而那一批还在 fresh 里没进列表 ——
     // 下次轮询从新游标开始，第二轮那批永远不会回来。
-    let cursor = nextSince.value
-    try {
-      for (let round = 0; round < REFRESH_ROUNDS; round++) {
-        const page = await fetchNewer(cursor, REFRESH_LIMIT)
-        if (my !== requestSeq) return
+  let cursor = nextSince.value
+  // 上一轮还在飞就跳过这一轮（网络慢、会话失效后在等重登时都会出现）。
+  // 没有这个锁的话，定时器每 30 秒再叠一个上去，登录成功后一起唤醒，
+  // 同一段数据会被并发拉好几遍。
+  if (pulling) return
+  pulling = true
+  try {
+    for (let round = 0; round < REFRESH_ROUNDS; round++) {
+      const page = await fetchNewer(cursor, REFRESH_LIMIT)
+      if (my !== requestSeq) return
 
         if (page.stats) {
           stats.value = page.stats
@@ -199,6 +206,8 @@ export function useNewsFeed() {
     } catch (e) {
       // 静默轮询失败不弹提示：网络抖一下就红字，比不刷新更烦人
       if (!silent) notice.value = e instanceof ApiError ? e.message : '刷新失败'
+    } finally {
+      pulling = false
     }
   }
 

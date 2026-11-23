@@ -1,8 +1,14 @@
 import { request } from './http'
 import type { AnalyzeResponse, NewsItem, NewsPage, StatusBody } from './types'
 
-export function fetchStatus(): Promise<StatusBody> {
-  return request<StatusBody>('/api/status')
+/**
+ * 顶栏的统计 + 当前角色。
+ *
+ * @param waitLogin 会话失效时是否挂起等重登。启动校验（boot）要传 false：
+ *   那时页面还停在「正在连接…」，登录层没渲染，挂住就是白等两分钟。
+ */
+export function fetchStatus(waitLogin = true): Promise<StatusBody> {
+  return request<StatusBody>('/api/status', { waitLogin })
 }
 
 /** 首屏：按发布时间倒序 */

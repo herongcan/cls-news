@@ -212,11 +212,19 @@ jobs:
             echo "::error::401 响应里出现了 WWW-Authenticate"; fail=1
           fi
 
-          echo "--- API 仍需鉴权 ---"
+          echo "--- Basic 只剩换发入口 ---"
           assert 401 '无凭证 /api/status'              "$BASE/api/status"
-          assert 200 'admin /api/status'               -u 'admin:admin' "$BASE/api/status"
-          assert 200 'guest /api/status'               -u 'guest:guest' "$BASE/api/status"
-          assert 403 'guest /api/visits'               -u 'guest:guest' "$BASE/api/visits"
+          # 密码正确也不行。Basic 能直连业务接口时，登出/旋转/过期这些作废手段全都绕得过去，
+          # 等于令牌体系白做；所以这里断言的是「密码对了也 401」。
+          assert 401 'Basic 直连 /api/status'          -u 'admin:admin' "$BASE/api/status"
+          assert 401 'Basic 直连 /api/news'            -u 'admin:admin' "$BASE/api/news"
+
+          echo "--- 令牌访问 ---"
+          A0=$(curl -s -X POST -u 'admin:admin' "$BASE/api/auth/token" | jq -r '.accessToken')
+          G0=$(curl -s -X POST -u 'guest:guest' "$BASE/api/auth/token" | jq -r '.accessToken')
+          assert 200 'admin /api/status'               -H "Authorization: Bearer $A0" "$BASE/api/status"
+          assert 200 'guest /api/status'               -H "Authorization: Bearer $G0" "$BASE/api/status"
+          assert 403 'guest /api/visits'               -H "Authorization: Bearer $G0" "$BASE/api/visits"
 
           echo "--- 不许借静态前缀绕过 ---"
           assert_blocked '/assets/../api/status'              --path-as-is "$BASE/assets/../api/status"
@@ -235,10 +243,10 @@ jobs:
           assert 401 '伪造 Bearer'                       -H 'Authorization: Bearer 乱写的' "$BASE/api/status"
           assert 401 '错误密码换令牌'                    -X POST -u 'admin:错的' "$BASE/api/auth/token"
           # 不带凭证时过滤器先拦（只对 POST 放行这三个端点），所以是 401；
-          # 带上 Basic 才轮到 Spring 的映射层回「方法不允许」405。
-          # 两者都拿不到令牌，但断言要写实际值 —— 写成同一条只会有一条永远红着。
+          # 带 Basic 也还是 401 —— Basic 分支已经删掉，过滤器不再认它，
+          # 所以这里不会走到 Spring 映射层，也就拿不到 405。
           assert 401 'GET /api/auth/token（无凭证）'     "$BASE/api/auth/token"
-          assert 405 'GET /api/auth/token（带 Basic）'   -u 'admin:admin' "$BASE/api/auth/token"
+          assert 401 'GET /api/auth/token（带 Basic）'   -u 'admin:admin' "$BASE/api/auth/token"
 
           echo "--- 刷新旋转 ---"
           TOK2=$(curl -s -X POST -H 'Content-Type: application/json' \
@@ -249,8 +257,10 @@ jobs:
             echo "::error::刷新令牌失败：$TOK2"; fail=1
           fi
           assert 200 '刷新后的新 access 可用'            -H "Authorization: Bearer $A2" "$BASE/api/status"
-          # refresh 一次性使用：旧的那个再换必须失败，否则「旋转」等于没做
-          assert 401 '旧 refresh 再用一次'               -X POST -H 'Content-Type: application/json' \
+          # 旧 refresh 旋转后不是立刻死，而是留 30 秒宽限（多标签同时刷新时不能互踢）。
+          # 所以这里期望 200 而不是 401；「窗口有界」由 TokenStoreTest 覆盖 ——
+          # 冒烟测试等不了 30 秒，写在这只会变成一条永远要 sleep 的断言。
+          assert 200 '旧 refresh 宽限内仍可换'           -X POST -H 'Content-Type: application/json' \
                  -d "{\"refreshToken\":\"$R1\"}" "$BASE/api/auth/refresh"
 
           echo "--- 登出必须真的登出 ---"
@@ -267,12 +277,60 @@ jobs:
           assert 200 '另一次登录不受登出影响'            -H "Authorization: Bearer $A3" "$BASE/api/status"
 
           echo "--- 角色能力差异 ---"
-          role=$(curl -s -u 'admin:admin' "$BASE/api/status" | jq -r '.role')
+          role=$(curl -s -H "Authorization: Bearer $A0" "$BASE/api/status" | jq -r '.role')
           [ "$role" = "rw" ] || { echo "::error::admin 的角色是 $role，期望 rw"; fail=1; }
-          guest_has_visit=$(curl -s -u 'guest:guest' "$BASE/api/status" | jq -r 'has("visitToday")')
+          guest_has_visit=$(curl -s -H "Authorization: Bearer $G0" "$BASE/api/status" | jq -r 'has("visitToday")')
           [ "$guest_has_visit" = "false" ] || {
             echo "::error::guest 的 /api/status 不应下发 visitToday"; fail=1; }
           echo "admin role=$role, guest 下发访客数=$guest_has_visit"
+
+          echo "--- 重启后会话仍在 ---"
+          # 这条是回归来的：原来令牌存在内存里，服务一重启全员掉线。而重启不是罕见路径 ——
+          # 改配置、部署、容器滚动更新都算，用户侧看到的是「刷着刷着突然要重新登录」。
+          T4=$(curl -s -X POST -u 'admin:admin' "$BASE/api/auth/token")
+          A4=$(echo "$T4" | jq -r '.accessToken')
+          R4=$(echo "$T4" | jq -r '.refreshToken')
+
+          kill "$PID" 2>/dev/null || true
+          for _ in $(seq 1 40); do
+            curl -fsS -o /dev/null --max-time 1 "$BASE/healthz" 2>/dev/null || break
+            sleep 0.5
+          done
+          wait "$PID" 2>/dev/null || true
+
+          APP_USER=admin APP_PASSWORD=admin \
+          APP_GUEST='guest:guest' APP_GUEST_DAILY_CAP=10 \
+          DB_PATH="$DB" \
+          java -jar "$JAR" --server.port=18080 >> "$LOG" 2>&1 &
+          PID=$!
+          ready=0
+          for _ in $(seq 1 45); do
+            if curl -fsS -o /dev/null --max-time 2 "$BASE/healthz"; then ready=1; break; fi
+            sleep 2
+          done
+          if [ "$ready" != 1 ]; then
+            echo "::error::重启后 90 秒内没有就绪"; tail -80 "$LOG"; exit 1
+          fi
+
+          assert 200 '重启后旧 access 仍有效'            -H "Authorization: Bearer $A4" "$BASE/api/status"
+          assert 200 '重启后旧 refresh 仍可换'           -X POST -H 'Content-Type: application/json' \
+                 -d "{\"refreshToken\":\"$R4\"}" "$BASE/api/auth/refresh"
+
+          echo "--- 换令牌限流 ---"
+          # 这一段必须放在最后：它会把 127.0.0.1 上的 admin 锁定 15 分钟，
+          # 后面再有任何「用密码换令牌」的断言都会先撞 429。
+          # 默认阈值 5 次：第 5 次仍然回 401（锁定是在这次失败之后才写进去的），第 6 次才是 429。
+          for i in 1 2 3 4 5; do
+            assert 401 "错误密码第 $i 次"               -X POST -u 'admin:错的' "$BASE/api/auth/token"
+          done
+          LOCK_HDR=$(curl -s -D- -o /dev/null -X POST -u 'admin:错的' "$BASE/api/auth/token" | tr -d '\r')
+          LOCK_CODE=$(printf '%s' "$LOCK_HDR" | head -1 | awk '{print $2}')
+          RETRY=$(printf '%s' "$LOCK_HDR" | grep -i '^Retry-After:' | awk '{print $2}')
+          [ "$LOCK_CODE" = "429" ] || { echo "::error::第 6 次错误密码应回 429，实际 $LOCK_CODE"; fail=1; }
+          [ -n "$RETRY" ] || { echo "::error::429 没有 Retry-After，客户端无从知道该等多久"; fail=1; }
+          # 锁定期间正确密码也必须被拒 —— 否则「锁」只是让攻击者换个密码继续试
+          assert 429 '锁定期间正确密码也 429'            -X POST -u 'admin:admin' "$BASE/api/auth/token"
+          echo "锁定生效，Retry-After=${RETRY}s"
 
           if [ "$fail" != 0 ]; then
             echo "::error::有断言未通过"

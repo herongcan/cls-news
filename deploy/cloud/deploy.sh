@@ -279,6 +279,8 @@ echo
 echo "  常用命令："
 echo "    看日志  ssh $HOST 'cd $REMOTE_DIR && docker compose logs -f --tail=50'"
 echo "    重启    ssh $HOST 'cd $REMOTE_DIR && docker compose restart'"
-echo "    查进度  curl -s -u $APP_USER_NAME:$APP_PW http://$PUBLIC_IP:$HOST_PORT/api/news | python3 -m json.tool | head -20"
+echo "    查进度  TOK=\$(curl -s -X POST -u $APP_USER_NAME:$APP_PW http://$PUBLIC_IP:$HOST_PORT/api/auth/token | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"accessToken\"])')"
+echo "            curl -s -H \"Authorization: Bearer \$TOK\" http://$PUBLIC_IP:$HOST_PORT/api/news | python3 -m json.tool | head -20"
+echo "            （密码只能换票，打业务接口要用令牌；curl -u 直连会得到 401）"
 echo "            （注意：运行镜像是 JRE，里面没有 sqlite3 命令，别用 docker compose exec 查库）"
 echo

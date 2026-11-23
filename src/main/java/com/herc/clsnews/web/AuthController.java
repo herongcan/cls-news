@@ -1,6 +1,10 @@
 package com.herc.clsnews.web;
 
+import com.herc.clsnews.config.AppProps;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -9,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -20,6 +25,10 @@ import java.util.Map;
  * 否则「凭证过期了想换新凭证」这件事就没有入口。放行的前提是本类自己把校验做严：
  * {@code /token} 校验 Basic 原文，{@code /refresh} 校验 refresh 一次性令牌。
  *
+ * <p>{@code /token} 是**全站唯一校验密码的地方**：{@link BasicAuthFilter} 已经不再接受
+ * Basic 访问任何业务接口，所以暴力破解的入口只有这一个，限流也只加在这一个上
+ * （见 {@link LoginThrottle}）。
+ *
  * <p>为什么不在登录页直接把密码存起来反复用：见 {@link TokenStore} 的类注释。
  */
 @RestController
@@ -27,15 +36,21 @@ import java.util.Map;
 @ConditionalOnProperty(prefix = "app.security", name = "enabled", havingValue = "true")
 public class AuthController {
 
+    private static final Logger log = LoggerFactory.getLogger(AuthController.class);
+
     /** refresh / logout 的请求体。用 record 接，不引入额外依赖。 */
     public record RefreshRequest(String refreshToken) { }
 
     private final AccountStore accounts;
     private final TokenStore tokens;
+    private final LoginThrottle throttle;
+    private final AppProps props;
 
-    public AuthController(AccountStore accounts, TokenStore tokens) {
+    public AuthController(AccountStore accounts, TokenStore tokens, LoginThrottle throttle, AppProps props) {
         this.accounts = accounts;
         this.tokens = tokens;
+        this.throttle = throttle;
+        this.props = props;
     }
 
     /**
@@ -43,30 +58,109 @@ public class AuthController {
      *
      * <p>用头而不是请求体传密码：{@code curl -u} 直接可用，不需要先拼 JSON；
      * 也不会把密码写进任何会被日志记录的 body。
+     *
+     * <p>失败路径有三条，前两条都要计数：
+     * <ol>
+     *   <li>被锁 → 429 + {@code Retry-After}，**完全不碰密码**（锁定期连正确的密码也不该放行，
+     *       否则锁定形同虚设）</li>
+     *   <li>凭证不对 → 先按失败次数等一小会儿（指数退避），再回 401</li>
+     *   <li>凭证正确 → 清零计数并签发</li>
+     * </ol>
+     *
+     * <p>用户名在密码校验**之前**就从头里解出来，只用于选计数键。它不可信，
+     * 但也不需要可信：拿它当键只是为了让「同一个 IP 试同一个账号」能被数到。
      */
     @PostMapping("/token")
     public ResponseEntity<Map<String, Object>> token(
-            @RequestHeader(value = "Authorization", required = false) String header) {
+            @RequestHeader(value = "Authorization", required = false) String header,
+            HttpServletRequest req) {
 
-        if (header == null || !header.regionMatches(true, 0, "Basic ", 0, 6)) {
-            return ResponseEntity.status(HttpServletResponse.SC_UNAUTHORIZED)
-                    .body(Map.of("error", "缺少 Basic 凭证"));
+        String ip = ClientIp.of(req, props.getSecurity().isTrustForwardedHeaders());
+        String user = basicUser(header);
+
+        LoginThrottle.Decision d = throttle.check(ip, user);
+        if (!d.allowed()) {
+            // 日志留一条：连续 429 出现在运维视角里就是「有人在试口令」
+            log.warn("换令牌被限流：ip={} user={} 还需等待 {}s", ip, user, d.retryAfterSec());
+            return ResponseEntity.status(429)
+                    .header("Retry-After", String.valueOf(d.retryAfterSec()))
+                    .body(Map.of("error", "登录尝试过于频繁，请 " + humanWait(d.retryAfterSec()) + "后再试"));
         }
-        AccountStore.Account acct;
-        try {
-            byte[] raw = Base64.getDecoder().decode(header.substring(6).trim());
-            acct = accounts.verifyBasic(raw);
-        } catch (IllegalArgumentException e) {
-            // Base64 都解不开，和密码错误等价处理，不额外透露是哪一步错
-            acct = null;
-        }
+
+        AccountStore.Account acct = verify(header);
         if (acct == null) {
+            long delay = throttle.recordFailure(ip, user);
+            pause(delay);
             return ResponseEntity.status(HttpServletResponse.SC_UNAUTHORIZED)
                     .body(Map.of("error", "账号或密码不对"));
         }
 
-        TokenStore.Tokens t = tokens.issue(acct.user(), acct.role());
-        return ResponseEntity.ok(body(t));
+        throttle.recordSuccess(ip, user);
+        return ResponseEntity.ok(body(tokens.issue(acct.user(), acct.role())));
+    }
+
+    /**
+     * 把 {@code Retry-After} 的秒数说成人话。
+     *
+     * <p>「请 900 秒后再试」没人看得懂是多久；「15 分钟」一眼就明白该等还是该找管理员。
+     */
+    private static String humanWait(long sec) {
+        if (sec < 60) return sec + " 秒";
+        long min = (sec + 59) / 60;
+        if (min < 60) return min + " 分钟";
+        return (min + 59) / 60 + " 小时";
+    }
+
+    /**
+     * 递增延迟。用 {@link Thread#sleep} 而不是异步：这个端点的正常流量是「登录一下」，
+     * 一天几十次，占住一个 Tomcat 线程 2 秒完全不心疼；换来的是实现足够简单，
+     * 不会因为异步调度出问题反而放行。
+     */
+    private static void pause(long ms) {
+        if (ms <= 0) return;
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            // 被中断（容器关闭）就不要再拖，把标志位还回去
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** 校验 Basic 凭证。任何解析异常都当「不对」，不区分是哪一步错。 */
+    private AccountStore.Account verify(String header) {
+        if (header == null || !header.regionMatches(true, 0, "Basic ", 0, 6)) {
+            return null;
+        }
+        try {
+            byte[] raw = Base64.getDecoder().decode(header.substring(6).trim());
+            return accounts.verifyBasic(raw);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * 从 Basic 头里取出用户名，取不到就返回空串。
+     *
+     * <p>只切第一个冒号：密码里可以有冒号，用户名不能。
+     * 用 ISO-8859-1 解而不是 UTF-8：这一步只为了得到计数键，用户名按约定是 ASCII，
+     * 解错了也不影响安全（键错只会让计数分成两条，不会让锁失效）。
+     */
+    private static String basicUser(String header) {
+        if (header == null || !header.regionMatches(true, 0, "Basic ", 0, 6)) {
+            return "";
+        }
+        try {
+            byte[] raw = Base64.getDecoder().decode(header.substring(6).trim());
+            int colon = -1;
+            for (int i = 0; i < raw.length; i++) {
+                if (raw[i] == ':') { colon = i; break; }
+            }
+            if (colon <= 0) return "";
+            return new String(raw, 0, colon, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return "";
+        }
     }
 
     /**

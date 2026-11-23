@@ -82,7 +82,7 @@ docker compose up -d                  # 默认只绑 127.0.0.1，端口 HOST_POR
 |---|---|---|
 | GET | `/healthz` | **唯一免鉴权**。真读一次库，UP 返回 200 / DOWN 返回 503 |
 | GET | `/api/news?limit=10` | 首屏，按发布时间倒序（`limit` 夹在 1~200） |
-| GET | `/api/news?since=<maxId>&limit=200` | 增量，返回 id 更新的条目（升序） |
+| GET | `/api/news?since=<nextSince>&limit=50` | 增量，返回 id 更新的条目（**id 升序**），一次最多 `limit` 条 |
 | GET | `/api/news?before=<minId>&limit=10` | 向下翻历史，返回 id 更小的条目（倒序） |
 | GET | `/api/news/search?q=关键词&limit=10` | 标题 + 正文 LIKE 搜索，结构与 `/api/news` 对齐 |
 | GET | `/api/news/{id}` | 单条 |
@@ -95,21 +95,49 @@ docker compose up -d                  # 默认只绑 127.0.0.1，端口 HOST_POR
 | GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv`。**游客与只读账号访问返回 403** |
 
 `/api/news` 的响应里带 `stats`，页面只发一个请求就能同时更新列表和状态栏。
-页面每 30 秒拉一次增量（`limit=200`，不分页），首屏和翻页各取 10 条。
+页面每 30 秒拉一次增量（`limit=50`），首屏和翻页各取 10 条。
+
+### 游标契约（`nextSince` / `hasMore`）
+
+```
+GET /api/news?since=X&limit=N
+→ items[]     id 升序（按 id 排，不按 publish_time）
+  nextSince   这次真正交付出去的最后一条 id；items 为空时原样返回 X
+  hasMore     游标之后还有没有积压
+  maxId       全局最大 id，仅为兼容老客户端保留，**不要拿它推进游标**
+```
+
+**为什么不能用 `maxId` 当游标**：一次最多只返回 `N` 条，而 `maxId` 是库里最新那条。
+拿它推进等于「没拿到的那部分也算看过了」—— 停机、锁屏、批量补数据之后积压超过一页时，
+中间那段再也不会被拉，表现为「少了几条，手动刷新才回来」。`nextSince` 只推进到真正交付的位置，
+`hasMore` 为真就继续追（前端最多追 5 轮，追不完下一轮接着追）。
+
+**为什么 `since` 的排序键必须是 id**：过滤条件是 `id > ?`，排序若按 `publish_time`，
+一页装不下时「本页最后一条」和「本页最大 id」就不是同一行 —— 回填的老消息 id 大、发布时间小，
+排最前面把一页占满，游标落在它身上，中间那批被永久跳过。这条有专门的回归用例
+（`NewsStoreCursorTest`），别「顺手优化」回去。
+
+**前端只推进到真正交付的位置**：搜索期间不插队也不推进游标，退出搜索时重新拉首屏。
+代价是增量窗口内按「入库顺序」呈现，回填的旧消息会短暂跳到最上面一次，下一次整屏刷新恢复。
+
 
 ### 访客明细：直接用 curl 看
 
 明细接口是给排查用的，页面上没有入口，形状也按命令行设计：
 
 ```bash
-A='admin:你的密码'; H='http://你的IP:8080'
-curl -u "$A" "$H/api/visits/logs"                  # 今天最新 50 条
-curl -u "$A" "$H/api/visits/logs?limit=200"        # 最多 500，超过会被夹紧
-curl -u "$A" "$H/api/visits/logs?before=1234"      # 翻下一页（取上一页返回的 nextBefore）
-curl -u "$A" "$H/api/visits/logs?day=2026-11-12"   # 指定自然日，格式必须是 yyyy-MM-dd
-curl -u "$A" "$H/api/visits/logs?ip=114.247."      # IP 前缀匹配，只记得网段时用
-curl -u "$A" "$H/api/visits/logs?device=wechat"    # wechat|wecom|qq|mobile|tablet|desktop|bot|unknown
-curl -u "$A" "$H/api/visits/logs?format=csv" -o visits.csv   # 导出，字段全带引号可放心用 Excel
+H='http://你的IP:8080'
+# 密码只用一次，换一张 30 分钟的票；之后所有命令都带 $TOK
+TOK=$(curl -s -X POST -u admin:你的密码 "$H/api/auth/token" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+
+curl -H "Authorization: Bearer $TOK" "$H/api/visits/logs"                  # 今天最新 50 条
+curl -H "Authorization: Bearer $TOK" "$H/api/visits/logs?limit=200"        # 最多 500，超过会被夹紧
+curl -H "Authorization: Bearer $TOK" "$H/api/visits/logs?before=1234"      # 翻下一页（取上一页返回的 nextBefore）
+curl -H "Authorization: Bearer $TOK" "$H/api/visits/logs?day=2026-11-12"   # 指定自然日，格式必须是 yyyy-MM-dd
+curl -H "Authorization: Bearer $TOK" "$H/api/visits/logs?ip=114.247."      # IP 前缀匹配，只记得网段时用
+curl -H "Authorization: Bearer $TOK" "$H/api/visits/logs?device=wechat"    # wechat|wecom|qq|mobile|tablet|desktop|bot|unknown
+curl -H "Authorization: Bearer $TOK" "$H/api/visits/logs?format=csv" -o visits.csv   # 导出，字段全带引号可放心用 Excel
 ```
 
 返回里几个字段值得说明：
@@ -132,30 +160,89 @@ curl -u "$A" "$H/api/visits/logs?format=csv" -o visits.csv   # 导出，字段�
 - **`vid` 为空时退回按 IP 算。** 无痕模式、清过缓存、老客户端都拿不到 vid，
   这时 `k` 会存成 `ip:...`，不会所有匿名访问被并成一个人。
 - **这个接口会返回同事的 IP。** 密码是共用的，谁拿到密码谁就能看全部明细 ——
-  自用工具可接受，但别把它开给外部，也别在没上 HTTPS 的时候用（Basic 是明文 Base64）。
+  自用工具可接受，但别把它开给外部，也别在没上 HTTPS 的时候用（换票的 Basic 与 Bearer 令牌都是明文）。
 
 ---
 
 ## 访问控制（放公网前必看）
 
-开启了 `app.security.enabled=true` 时，除了 `/healthz`、`/`、`/index.html` 之外全部路径要求
-HTTP Basic 认证。**登录框不在浏览器里，而在页面里** —— 原因见下表最后一行。
+开启了 `app.security.enabled=true` 时，只有下面这些路径免凭证：
+
+`/healthz`、`/`、`/index.html`、`/legacy.html`、`/assets/**`（构建产物），以及浏览器自己会
+要的 `/favicon.ico`、`/robots.txt`、`/apple-touch-icon*.png`。**其余全部要求 Bearer 令牌。**
+
+**登录框不在浏览器里，而在页面里**：页面先加载出来，登录层做在页面内，输完账号密码打
+`POST /api/auth/token` 换一对令牌，之后每个请求带 `Authorization: Bearer <accessToken>`。
+（为什么不弹浏览器原生框：移动端内核收到 `401 + WWW-Authenticate` 不会弹输入框，
+而是把 401 渲染成一张白页。见下表最后一行。）
 
 ```bash
 APP_AUTH=true APP_USER=admin APP_PASSWORD='你的密码' java -jar target/cls-news-0.1.0.jar
 ```
 
+### 令牌：密码只出现一次
+
+| 端点 | 干什么 | 怎么鉴权 |
+|---|---|---|
+| `POST /api/auth/token` | 用账号密码换一对令牌 | Basic 头（**全站唯一接受密码的地方**） |
+| `POST /api/auth/refresh` | 用 refresh 换新的一对（旧的一次性旋转，留 30 秒宽限给多标签） | 请求体里的 refresh |
+| `POST /api/auth/logout` | 按 session 把 access + refresh 一起作废 | 请求体里的 refresh |
+
+- **access 30 分钟、refresh 7 天**（`APP_TOKEN_ACCESS_TTL` / `APP_TOKEN_REFRESH_TTL`）。
+  access 短是因为它每个请求都带，泄露窗口就是它的寿命。
+- **存 `auth_token` 表，落的是 SHA-256 哈希不是原文。** 库文件会被备份、被拷到别的机器排查，
+  原文进去等于把登录凭据一起备份了。
+- **重启不掉线。** 容器滚动更新、改配置重启都不会把用户踢下去 —— 这一条是踩出来的：
+  最初令牌在内存里，`/api/status` 里 `runs` 一变、所有人立刻被要求重新登录。
+- **登出按 session 作废**，不是按账号：同一个人在另一台设备上登录，不会被这边点退出牵连。
+
+### Basic 只能换令牌，不能直连接口
+
+`curl -u` 打任何业务接口都会拿到 **401**（哪怕密码是对的），响应体写着该怎么做。
+密码是长期凭证，一旦能直连，登出/旋转/过期这些作废手段全都绕得过去 —— 等于令牌体系白做。
+所以运维脚本多一行：
+
+```bash
+H='http://你的IP:8080'
+TOK=$(curl -s -X POST -u admin:你的密码 "$H/api/auth/token" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+curl -H "Authorization: Bearer $TOK" "$H/api/status"
+```
+
+### 换令牌有失败限流
+
+`POST /api/auth/token` 是全站唯一校验密码的地方，所以限流也只加在这一处：
+
+| 规则 | 值 | 为什么 |
+|---|---|---|
+| 失败计数维度 | **IP + 账号**（组合） | 只按 IP：办公室十几个人共用一个出口，五个人各错一次就锁死全公司；只按账号：任何人故意错五次就能把 admin 锁死，等于不用密码的 DoS |
+| 连续失败阈值 | 5 次 | 正常人很少连错五次，脚本五次之后就该被挡 |
+| 锁定时长 | 15 分钟 | 够让攻击者放弃，又不至于让忘了密码的人等一整天 |
+| 失败延迟 | 200ms → 400 → 800 → 1600 → 封顶 2s | 拖死单线程脚本；锁定挡并发 |
+| 超限响应 | `429` + `Retry-After` | 前端直接把文案显示出来，不用猜 |
+
+锁定期间**连正确的密码也回 429**（否则「锁」只是让攻击者换个密码继续试）。
+计数在内存里，重启清零 —— 攻击者没法让服务重启，所以这不算绕过。
+
+可调：`APP_LOGIN_MAX_FAILS`、`APP_LOGIN_LOCK`、`APP_LOGIN_FAIL_DELAY`、`APP_LOGIN_MAX_DELAY`。
+
+> 默认密码还是 `admin`。启动日志里会有一条 `WARN ... 仍在使用默认密码 admin`，
+> 放到公网前务必用 `APP_PASSWORD` 覆盖 —— 限流只能让爆破变慢，不能救一个已知口令。
+
 四个设计上故意做的选择：
+
 
 | 选择 | 原因 |
 |---|---|
 | 密码为空时**拒绝启动** | 最危险的状态不是「没开鉴权」，而是「以为开了、其实密码是空串」 |
 | 白名单用**完全相等**匹配，不用 `startsWith`，并拦掉 `..` `//` `;` | 实测过：用 `startsWith` 时 `/healthz/../api/status` 会被放行，能否挡住全看 Tomcat 的实现，等于把安全交给别人的默认值 |
-| 不引入 `spring-boot-starter-security` | 那套自带登录页、CSRF、会话，要关的比要开的多；40 行 Filter 行为完全可预期 |
-| **`index.html` 免鉴权，凭证由页面自己收** | 移动端（微信 / QQ / UC 内核、Android WebView）收到 `401 + WWW-Authenticate` 不会弹原生输入框，而是把 401 渲染成白页 —— 电脑上正常，同事用手机点开只看到「需要登录」三个字。所以页面先放行，登录层做在页面里，输完把 Base64 塞进 `Authorization` 头打 `/api/**` |
+| 不引入 `spring-boot-starter-security` | 那套自带登录页、CSRF、会话，要关的比要开的多；一百多行 Filter 行为完全可预期 |
+| **`index.html` 与 `/assets/**` 免鉴权，凭证由页面自己收** | 移动端（微信 / QQ / UC 内核、Android WebView）收到 `401 + WWW-Authenticate` 不会弹原生输入框，而是把 401 渲染成白页 —— 电脑上正常，同事用手机点开只看到「需要登录」三个字。所以页面先放行，登录层做在页面里；`<script src>` 也不会带 Authorization 头，静态资源不放行就是整页白屏 |
 
 代价要说清楚：`index.html` 本身谁都能拿到（一个空壳，只有标题和样式），数据全在 `/api/**` 后面。
-另外 401 **只对非 `/api/` 请求**发 `WWW-Authenticate`，否则 Safari 会在页内登录层上面再弹一个原生框、输完还关不掉。
+另外 **任何 401 都不发 `WWW-Authenticate`**（不只是 `/api/`）：只要有一条请求带着 challenge，
+Chrome / Safari 就会在页内登录层之上再盖一层原生框，输对了也关不掉 —— 最先踩到的是
+浏览器自动请求的 `/favicon.ico`。
 
 ### 三档角色：可写 / 游客 / 只读
 
@@ -225,11 +312,12 @@ java -jar target/cls-news-0.1.0.jar
 
 ```bash
 APP_AUTH=true APP_USER=admin APP_PASSWORD=t3st java -jar target/cls-news-0.1.0.jar
-# 然后用错的密码试一次，应该停在「账号或密码不对」
-curl -u 1:1 localhost:8080/api/status    # 期望 401
+# 然后用错的密码换一次票，应该拿到「账号或密码不对」
+curl -s -X POST -u 1:1 localhost:8080/api/auth/token    # 期望 401
 ```
 
-> Basic 认证的凭据是 Base64，**不是加密**。公网必须套 HTTPS，否则等同明文密码。
+> 换票用的 Basic 凭据是 Base64，**不是加密**。公网必须套 HTTPS，否则等同明文密码
+> （令牌同理：明文 Bearer 被截获即可冒用）。
 > 最省事的替代方案：端口只绑 `127.0.0.1`，用 SSH 隧道访问 —— 不需要域名、备案、证书。
 
 **上反向代理（Caddy / Nginx / CDN）时必须设 `APP_TRUST_XFF=true`**，否则 `remoteAddr` 全是代理机地址，
@@ -308,11 +396,15 @@ curl -u 1:1 localhost:8080/api/status    # 期望 401
 手动触发单条：
 
 ```bash
-curl -u admin:你的密码 -X POST 'http://localhost:8080/api/news/1/analyze'
-curl -u admin:你的密码 -X POST 'http://localhost:8080/api/analysis/retry-failed'   # 调大 token 或换 key 后重跑失败项
+H='http://localhost:8080'
+TOK=$(curl -s -X POST -u admin:你的密码 "$H/api/auth/token" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+curl -H "Authorization: Bearer $TOK" -X POST "$H/api/news/1/analyze"
+curl -H "Authorization: Bearer $TOK" -X POST "$H/api/analysis/retry-failed"   # 调大 token 或换 key 后重跑失败项
 ```
 
-> 开了鉴权之后这两个 curl 必须带 `-u`，否则拿到的是 401 —— 以前没带也能调，是因为当时还没开鉴权。
+> 开了鉴权之后这两个 curl 必须带令牌。用 `-u` 直接打业务接口会拿到 401 ——
+> 密码只能用来换票（见「访问控制」那节），这是刻意的。
 
 
 ---
@@ -351,7 +443,7 @@ pending ──(原子认领)──> analyzing ──> done
 
 | | 当初的口径 | 现在的事实 |
 |---|---|---|
-| 是否公网可访问 | 不暴露 | 暴露在 `http://<IP>:8080`，靠 Basic 密码挡着 |
+| 是否公网可访问 | 不暴露 | 暴露在 `http://<IP>:8080`，靠令牌 + 换票限流挡着 |
 | 谁能看 | 只有我 | 十来个同事共用同一个账号 |
 | 正文 | `fulltext = true` 存全文 | 仍然 `true`，也就是每个登录的人都能看到财联社全文 |
 
@@ -439,7 +531,7 @@ ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
 
 ### 运行一次会看到什么
 
-1. `./mvnw -B -DskipTests package`（首次约 2 分钟，有 Maven 缓存后 40 秒左右）
+1. `./mvnw -B package`（含 47 个单元测试；首次约 2 分钟，有 Maven 缓存后 40 秒左右）
 2. 校验 `target/cls-news-0.1.0.jar` 是 Spring Boot fat jar（否则服务器上会报
    `no main manifest attribute`，得翻半天日志）
 3. `ssh-keyscan` 写 `known_hosts`（不用 `StrictHostKeyChecking=no`，那个等于关掉中间人防护）
@@ -540,15 +632,30 @@ src/main/java/com/herc/clsnews/
 └── web/
     ├── NewsController.java      /api/news|search|analysis|status|visits（9 个接口）
     ├── VisitController.java     /api/visit/ping
-    ├── HealthController.java    /healthz（唯一免鉴权）
-    ├── BasicAuthFilter.java     HTTP Basic，白名单 + 常量时间比较
+    ├── HealthController.java    /healthz（健康检查）
+    ├── BasicAuthFilter.java     Bearer 鉴权 + 白名单 + 角色矩阵 + 路径穿越检查（Basic 一律拒）
+    ├── AccountStore.java        内存账号表（rw / guest / ro），常数时间比较
+    ├── TokenStore.java          令牌表（SQLite，存哈希）：签发、校验、旋转+30 秒宽限、按 session 作废
+    ├── LoginThrottle.java       换票失败限流：ip+账号计数、5 次锁 15 分钟、指数退避
+    ├── AuthController.java      /api/auth/token|refresh|logout
+    ├── LikePattern.java         用户输入 → LIKE 模式（通配符转义）
     ├── ClientIp.java            取真实 IP（默认不信 XFF）
     └── UserAgent.java           UA → device / os / browser，纯静态零依赖
 
 src/main/resources/
-├── static/index.html            整页，无构建、无 CDN（登录层也在这里）
+├── static/                     前端构建产物（index.html + assets/，旧版留作 legacy.html 回滚入口）
 ├── prompts/analyze-news.md      提示词 + 输出结构（改这里就够了）
-└── schema.sql                   建表（news / visit / access_log）
+└── schema.sql                   建表（news / analysis_call / visit / visitor / access_log）
+
+src/test/java/com/herc/clsnews/
+├── store/NewsStoreCursorTest    游标边界：since 排序键、截断、翻页不重不漏
+├── store/NewsStoreClaimTest     分析状态迁移 + 两线程抢同一条
+├── web/LikePatternTest          % _ \ 转义，以及「搜 100% 不该命中 100 元」
+├── web/AuthMatrixTest           rw / guest / ro × 各端点，401 不带 challenge
+├── web/NewsApiCursorTest        /api/news 的 nextSince / hasMore 契约
+├── web/AnalysisJsonTest         analysis_json 脏数据、少字段、截断
+├── ai/QuotaTest                 游客额度 / 全站上限 / 按 actor 计数 / 跨天
+└── support/                     临时 sqlite + standalone MockMvc 测试台
 
 deploy/
 ├── cloud/                       云上那一套：deploy.sh、backup.sh、restore.sh、systemd timer
@@ -559,6 +666,41 @@ tools/eval/                      分析质量评估：labels.csv 人工标注 + 
 
 ---
 
+## 测试
+
+```bash
+./mvnw test                    # 47 个用例，约 3 秒
+./mvnw test -Dtest=NewsApiCursorTest   # 只跑游标那一组
+```
+
+**不起 `@SpringBootTest`。** 起全容器会让 `@Scheduled` 的采集与分析任务真的跑起来（要假 key、
+会真花钱），失败原因还会被一堆 Bean 初始化日志埋掉。现在的做法是：`store` 与过滤器用真实
+`JdbcTemplate` + `@TempDir` 里的临时 sqlite 构造，接口层用 standalone `MockMvc` 直接挂
+`NewsController`，只把「会联网的那两个」（`IngestJob` / `NewsSource`）换成假对象。
+
+**建表直接执行生产用的 `schema.sql`**，不手抄一份 —— 抄一份的话 schema 改了测试还是绿的。
+
+| 用例 | 钉住什么 |
+|---|---|
+| `NewsStoreCursorTest` | `since` 的过滤键是 id，排序键也必须是 id；截断时游标落在已交付那条；`before` 翻页不重不漏 |
+| `NewsApiCursorTest` | 积压超过一页时 `nextSince` 停在交付处（**不是全局 `maxId`**）；空页游标原地不动；`before` 不碰增量游标 |
+| `NewsStoreClaimTest` | `claimOne` / `claimPending` / `resetStuck` / `releaseClaims` 的状态迁移；两个线程抢同一条只有一个成功 |
+| `LikePatternTest` | `%` `_` `\` 转义，以及「搜 `100%` 不该命中 `100元`」（只断言字符串不够，要真查库） |
+| `QuotaTest` | 游客 10 条封顶、全站上限对所有人、按 actor 分开计数、跨天清零 |
+| `AuthMatrixTest` | rw / guest / ro × 各端点；**任何 401 都不带 `WWW-Authenticate`**；白名单不能被 `..` / `%2f` 绕过 |
+| `AnalysisJsonTest` | 脏 JSON 只影响那一条、少字段照常渲染、`/api/analysis/state` 不整条 500 |
+
+**怎么确认这些测试真的有用**：把实现改回旧写法，看它是不是红的。实测两次：
+
+```
+since 改回 ORDER BY publish_time  → NewsStoreCursorTest 2 条红（expected 2,3 / was 3,2）
+游标改回 store.maxId()            → NewsApiCursorTest 1 条红（nextSince 期望 52，实际 62）
+```
+
+改回去再跑就全绿 —— 说明断言咬的是行为，不是「代码长什么样」。
+
+---
+
 ## 下一步（按优先级，2026-11-13 的现状）
 
 上一版这里列过四件事：跑满一天、抽查 20 条、攒 30 条人工标注做回归、部署上云。前三件里前两件做完了，
@@ -566,10 +708,10 @@ tools/eval/                      分析质量评估：labels.csv 人工标注 + 
 
 | 优先级 | 事情 | 为什么 |
 |---|---|---|
-| 1 | **把访问密码从 `admin/admin` 换掉** | 现在知道地址的人试一下就能进，而里面是财联社全文。改密码要改 `.env` 的 `APP_PASSWORD` 再重新部署 —— 没有热更新，因为 `BasicAuthFilter` 的 `doFilter` 是 `final`，CGLIB 代理不到，配置中心的刷新对它无效 |
+| 1 | **把访问密码从 `admin/admin` 换掉** | 里面是财联社全文，而默认口令是写在本仓库里的。换票已有限流（5 次 / 15 分钟），只能让爆破变慢，救不了已知口令。改密码要改 `.env` 的 `APP_PASSWORD` 再重新部署 —— 没有热更新，因为 `BasicAuthFilter` 的 `doFilter` 是 `final`，CGLIB 代理不到，配置中心的刷新对它无效 |
 | 2 | **备份改小时级 + 加异地副本** | 现在 RPO 24 小时，且备份和原库在同一台机器上，机器挂了等于没备份 |
 | 3 | **`fulltext` 改 `false`** | 让性质从「小范围转载」退回「索引」，见上面合规那节 |
-| 4 | **补测试** | `src/test` 现在是空的。想换数据库（比如以后上 RDS PG）之前必须先有回归，否则改 SQL 全靠手点 |
+| 4 | **换库之前先扩测试** | `src/test` 已有 73 个用例（游标边界 / 状态迁移 / 并发抢锁 / LIKE 转义 / 配额 / 权限矩阵 / 换票限流 / JSON 兜底），CI 里 `./mvnw package` 会执行。但这些只覆盖 store、controller 与 filter，`IngestJob`、`AnalysisWorker`、`ClsApiSource` 的解析还没有用例 —— 想换数据库或改采集协议之前得先补上这些 |
 | 5 | 隧道链路太慢 | 迁香港/新加坡轻量（域名直接 A 记录 + Caddy 自动签证书），或把 ICP 备案办下来走境内直连。两者都要改 `BIND_ADDR=127.0.0.1` 并收掉安全组的 8080 |
 | 6 | 清理 `visit` 表的历史脏数据 | 79 条里有 66 个是只来过一次的扫描器 IP（旧拦截器口径留下的），要不要删需要你拍板 |
 

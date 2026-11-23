@@ -207,8 +207,14 @@ done
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/healthz           # 200
 curl -s -o /dev/null -w '%{http_code}\n' http://IP:8080/api/news          # 401
-curl -s -u admin:密码 http://IP:8080/api/status | python3 -m json.tool     # analysisReady
+# 密码只用来换票，换完带上 Bearer 再查：
+TOK=$(curl -s -X POST -u admin:密码 http://IP:8080/api/auth/token \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+curl -s -H "Authorization: Bearer $TOK" http://IP:8080/api/status | python3 -m json.tool
 ```
+
+> `curl -u admin:密码 http://IP:8080/api/news` 现在拿到的是 **401**，不是数据 ——
+> 密码不能直连业务接口，只能换票（见下面「会话与重启」）。
 
 第 3 条重点看 `analysisReady`：`false` 说明 `.env` 里的 key 没生效，
 同事点「分析」只会拿到 503。
@@ -234,8 +240,10 @@ curl http://你的公网IP:8080/healthz
 # 2. 鉴权是否生效（不带凭据应该 401）
 curl -i http://你的公网IP:8080/api/news | head -3
 
-# 3. 带凭据应该 200
-curl -u admin:密码 -s http://你的公网IP:8080/api/news | head -c 200
+# 3. 换票 + 带票访问应该 200
+TOK=$(curl -s -X POST -u admin:密码 http://你的公网IP:8080/api/auth/token \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+curl -s -H "Authorization: Bearer $TOK" http://你的公网IP:8080/api/news | head -c 200
 ```
 
 三条都对了，再打开浏览器确认页面能出列表。
@@ -251,8 +259,10 @@ ssh root@IP 'cd /opt/cls-news && docker compose logs -f --tail=50'
 # 重启
 ssh root@IP 'cd /opt/cls-news && docker compose restart'
 
-# 看采集和分析进度（走 API，最省事）
-curl -s -u admin:密码 http://IP:8080/api/status | python3 -m json.tool
+# 看采集和分析进度（走 API，最省事；先换一张票）
+TOK=$(curl -s -X POST -u admin:密码 http://IP:8080/api/auth/token \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+curl -s -H "Authorization: Bearer $TOK" http://IP:8080/api/status | python3 -m json.tool
 
 # 查库：运行镜像是 JRE，里面没有 sqlite3，别用 docker compose exec 去查。
 # 宿主机装了 sqlite3 才能这么读；加 -readonly，别在线上库上抢写锁。
@@ -264,6 +274,18 @@ ssh root@IP "sqlite3 -readonly /var/lib/docker/volumes/cls-news_cls-data/_data/n
   \"select id, substr(last_error,1,80) from news where analysis_status='failed' order by id desc limit 10\""
 ```
 
+### 会话与重启（别把「重启后要重登」当故障）
+
+- **重启不会让任何人掉线。** 令牌存在容器的 `/app/data/news.db`（`auth_token` 表），
+  `docker compose restart`、`deploy.sh` 滚动更新、改配置重启都只是换个进程，原会话照旧有效。
+  只有三种情况会要求重新登录：refresh 到期（默认 7 天）、用户自己点了退出、
+  或者库被清空/换掉了（那时令牌行没了，服务端只能回 401）。
+- **密码不能直连业务接口**，只能用来换票。任何 `curl -u` 打 `/api/**` 都会拿到 401
+  和一句「Basic 凭证只能用于 POST /api/auth/token」—— 这是刻意收窄的，不是坏了。
+- **换票有失败限流**：同一 IP + 同一账号连续错 5 次锁 15 分钟，期间连正确密码也回 `429`，
+  带 `Retry-After`。日志里会出现 `换令牌连续失败 N 次，锁定 900s`，看到它就该考虑换密码。
+- **默认密码 `admin` 会在启动日志里留一条 WARN**（`仍在使用默认密码 admin`）。
+
 ### 看访问明细（谁、什么设备、什么时候）
 
 访客统计分两张表，口径不同，别混着看：
@@ -273,14 +295,16 @@ ssh root@IP "sqlite3 -readonly /var/lib/docker/volumes/cls-news_cls-data/_data/n
 | `visit` | IP + 自然日去重 | 页面顶栏「今日访客 / 累计」，含 11-13 之前的历史脏数据 |
 | `access_log` | 每次打开记一行（同 IP 60 秒内只记一次） | 设备、UA、时间分布，保留 90 天 |
 
-**明细有接口了，优先用它**（`/api/visits/logs`，走 Basic 鉴权，形状按命令行设计）：
+**明细有接口了，优先用它**（`/api/visits/logs`，走 Bearer 令牌，形状按命令行设计）：
 
 ```bash
-curl -s -u admin:密码 'http://IP:8080/api/visits/logs'                 # 今天最新 50 条
-curl -s -u admin:密码 'http://IP:8080/api/visits/logs?day=2026-11-12'   # 指定日期
-curl -s -u admin:密码 'http://IP:8080/api/visits/logs?ip=114.247.'      # IP 前缀
-curl -s -u admin:密码 'http://IP:8080/api/visits/logs?device=wechat'    # 只看微信
-curl -s -u admin:密码 'http://IP:8080/api/visits/logs?format=csv' -o visits.csv
+TOK=$(curl -s -X POST -u admin:密码 'http://IP:8080/api/auth/token' \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+curl -s -H "Authorization: Bearer $TOK" 'http://IP:8080/api/visits/logs'                 # 今天最新 50 条
+curl -s -H "Authorization: Bearer $TOK" 'http://IP:8080/api/visits/logs?day=2026-11-12'   # 指定日期
+curl -s -H "Authorization: Bearer $TOK" 'http://IP:8080/api/visits/logs?ip=114.247.'      # IP 前缀
+curl -s -H "Authorization: Bearer $TOK" 'http://IP:8080/api/visits/logs?device=wechat'    # 只看微信
+curl -s -H "Authorization: Bearer $TOK" 'http://IP:8080/api/visits/logs?format=csv' -o visits.csv
 ```
 
 需要聚合口径（设备分布、按日 UV、疑似爬虫）时再查库：
@@ -648,8 +672,10 @@ target/*
 运行镜像是 `eclipse-temurin:17-jre`（JRE，不含 sqlite3 命令行）。查数据走 API 或宿主机装 sqlite3：
 
 ```bash
-# 推荐：走 API 的 stats 字段
-curl -s -u admin:密码 http://IP:8080/api/news | python3 -m json.tool | head -20
+# 推荐：走 API 的 stats 字段（先换票）
+TOK=$(curl -s -X POST -u admin:密码 http://IP:8080/api/auth/token \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+curl -s -H "Authorization: Bearer $TOK" http://IP:8080/api/news | python3 -m json.tool | head -20
 
 # 或者宿主机装一个
 ssh root@IP 'apt-get install -y sqlite3 && docker run --rm -v cls-news_cls-data:/data \

@@ -70,8 +70,15 @@ export interface Stats {
 
 export interface NewsPage {
   items: NewsItem[]
-  maxId: number
+  /**
+   * 增量游标：这次真的交付出去的最后一条 id。
+   * 前端只能拿它推进 since —— 用 maxId 会在积压超过一页时把没交付的条目跳过。
+   */
+  nextSince?: number
+  /** 游标之后还有积压，需要继续追。首屏/翻历史的含义是「还能往下翻」 */
   hasMore: boolean
+  /** 全局最大 id。只为兼容保留，不要拿它当增量游标 */
+  maxId: number
   serverTime: number
   total?: number
   stats?: Stats

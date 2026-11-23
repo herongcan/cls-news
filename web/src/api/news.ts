@@ -1,8 +1,14 @@
 import { request } from './http'
 import type { AnalyzeResponse, NewsItem, NewsPage, StatusBody } from './types'
 
-export function fetchStatus(): Promise<StatusBody> {
-  return request<StatusBody>('/api/status')
+/**
+ * 顶栏的统计 + 当前角色。
+ *
+ * @param waitLogin 会话失效时是否挂起等重登。启动校验（boot）要传 false：
+ *   那时页面还停在「正在连接…」，登录层没渲染，挂住就是白等两分钟。
+ */
+export function fetchStatus(waitLogin = true): Promise<StatusBody> {
+  return request<StatusBody>('/api/status', { waitLogin })
 }
 
 /** 首屏：按发布时间倒序 */
@@ -16,8 +22,10 @@ export function fetchBefore(before: number, limit = 10): Promise<NewsPage> {
 }
 
 /**
- * 增量：id 更大的新条目（since = 当前已展示的最大 id）。
- * 后端遇到 since 不分页，一次把积压的都返回，所以这里给足 limit。
+ * 增量：id 更大的新条目。`since` 传上一次响应里的 `nextSince`。
+ *
+ * 后端一次最多回 limit 条，`hasMore` 为真说明还有积压；调用方要按
+ * `nextSince` 继续追，**不能**用 `maxId` 直接跳到底 —— 那会把没拿到的那段永久跳过。
  */
 export function fetchNewer(since: number, limit = 50): Promise<NewsPage> {
   return request<NewsPage>('/api/news', { query: { limit, since } })

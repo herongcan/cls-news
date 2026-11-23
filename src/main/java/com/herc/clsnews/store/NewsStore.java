@@ -67,10 +67,32 @@ public class NewsStore {
         return jdbc.query("SELECT * FROM news ORDER BY publish_time DESC, id DESC LIMIT ?", MAP, limit);
     }
 
-    /** 增量：id 大于游标的都返回。按发布时间升序，前端逐个插到最前面即可保持「新的在上」。 */
+    /**
+     * 增量：id 大于游标的都返回，按 <b>id</b> 升序。
+     *
+     * <p>这里的 {@code ORDER BY} 不能写 {@code publish_time}，即使它看起来更「自然」。
+     * 游标的过滤键是 id，排序键就必须也是 id —— 两者不一致时，一页装不下的那次
+     * （停机、离线、批量补数据之后积压超过 limit）会让「本页最后一条」和
+     * 「本页最大 id」不是同一行：回填进来的老消息 id 大、publish_time 小，
+     * 排在最前面把一页占满，游标落在它身上，中间那批就被永久跳过。
+     * 这个 bug 曾经真实存在，症状是「锁屏两分钟回来少了几条」。
+     *
+     * <p>代价是增量窗口内按「入库顺序」而不是「发布时间」呈现，回填的旧消息
+     * 会短暂跳到最上面一次；下一次整屏刷新就恢复按发布时间排。
+     * 宁可顺序难看一点，也不能丢条目。
+     */
     public List<News> since(long sinceId, int limit) {
         return jdbc.query(
-                "SELECT * FROM news WHERE id > ? ORDER BY publish_time ASC, id ASC LIMIT ?", MAP, sinceId, limit);
+                "SELECT * FROM news WHERE id > ? ORDER BY id ASC LIMIT ?", MAP, sinceId, limit);
+    }
+
+    /**
+     * 游标之后是否还有行。给增量分页判断「要不要继续追」。
+     *
+     * <p>不用 {@code count(*)}：只需要知道「有没有」，命中一条就能停。
+     */
+    public boolean hasAfter(long id) {
+        return !jdbc.queryForList("SELECT 1 FROM news WHERE id > ? LIMIT 1", id).isEmpty();
     }
 
     /**
@@ -130,7 +152,15 @@ public class NewsStore {
         return n == null ? 0 : n;
     }
 
-    /** 全局最大 id，作为前端增量游标。用全局值而不是「本页最大值」，避免分页边界重复。 */
+    /**
+     * 全局最大 id。
+     *
+     * <p><b>不要拿它当增量游标。</b>它表示「库里最新的一条」，不代表「已经交付给用户的一条」；
+     * 拿它推进游标会在积压超过一页时把没交付的条目直接跳过。游标请用响应里的
+     * {@code nextSince}（= 本次真正返回的最后一条 id）。
+     *
+     * <p>现在只剩两个用途：接口里的兼容字段、以及给测试/脚本判断进度。
+     */
     public long maxId() {
         Long n = jdbc.queryForObject("SELECT COALESCE(MAX(id), 0) FROM news", Long.class);
         return n == null ? 0 : n;

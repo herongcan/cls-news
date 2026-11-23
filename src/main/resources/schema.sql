@@ -102,3 +102,27 @@ CREATE TABLE IF NOT EXISTS access_log (
 
 CREATE INDEX IF NOT EXISTS idx_access_ts ON access_log (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_access_day ON access_log (day, vid);
+
+-- 登录令牌（access / refresh）。以前放在内存里，进程一重启所有人掉线：
+-- 采集任务改了要重启、改配置要重启、容器滚动更新也会重启 —— 用户那边的表现是
+-- 「刷着刷着突然要重新登录」，而他手里明明什么都没做错。
+--
+-- 存的是 **SHA-256 令牌哈希**，不是令牌原文。库文件会被备份、会被复制到别处排查问题，
+-- 原文落库等于把可用的登录凭据一起备份出去；哈希不可反推（令牌本身就是 32 字节随机数）。
+--
+-- session 是「同一次登录」的标识：access 与 refresh 配对签出时共用，刷新时保持不变，
+-- 登出时按它一次删掉这一串。不能按 username 删 —— 那样同一个人另一台设备会被顺带踢掉。
+--
+-- expires_at 用**毫秒**：前端拿到的 accessExpiresAt 也是毫秒，两边不用换算。
+CREATE TABLE IF NOT EXISTS auth_token (
+    token_hash TEXT    PRIMARY KEY,
+    kind       TEXT    NOT NULL,                      -- access | refresh
+    username   TEXT    NOT NULL,
+    role       TEXT    NOT NULL,
+    session    TEXT    NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_session ON auth_token (session);
+CREATE INDEX IF NOT EXISTS idx_token_expires ON auth_token (expires_at);

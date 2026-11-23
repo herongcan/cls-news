@@ -12,7 +12,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.Base64;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -23,12 +22,20 @@ import java.util.regex.Pattern;
  * 对一个只有一页前端的私用工具来说，需要关掉的东西比要打开的多。这里一百多行 Filter
  * 已经把这件事说完，且行为完全可预期。
  *
- * <p>两种凭证并存，分工明确：
- * <ul>
- *   <li><b>Bearer token</b> —— 浏览器/小程序的日常请求。短期、不含密码、可作废。</li>
- *   <li><b>Basic</b> —— 只用于两处：{@code POST /api/auth/token} 换令牌，以及运维的
- *       {@code curl -u}。保留它是为了排查问题时不必先换一次 token。</li>
- * </ul>
+ * <p>凭证只有一种形态：**Bearer token**。浏览器、小程序、定时脚本全都走它。
+ *
+ * <p>Basic 头在这里**一律不接受**，唯一的例外是 {@code POST /api/auth/token} ——
+ * 而那条路径在下面被直接放行，压根不经过本过滤器（由
+ * {@link AuthController#token} 自己校验并限流）。所以这个类里没有 Basic 分支。
+ *
+ * <p>为什么要收掉：密码是长期凭证，Basic 能直连业务接口时，拿到密码就等于永久拿到了
+ * 全部权限（可以 curl、可以绕过令牌的一切作废手段）。收掉之后密码只剩「换一张 30 分钟的票」
+ * 这一个作用，泄露的影响面从「永久」缩到「一次换票」—— 而且换票被
+ * {@link LoginThrottle} 卡着。运维的 {@code curl} 也就多一步：
+ * <pre>{@code
+ * TOK=$(curl -s -X POST -u admin:密码 $H/api/auth/token | jq -r .accessToken)
+ * curl -H "Authorization: Bearer $TOK" $H/api/status
+ * }</pre>
  *
  * <p>三档角色的划分理由是「能造成多大伤害」，不是「能看多少东西」：
  * <ul>
@@ -131,12 +138,10 @@ public class BasicAuthFilter extends OncePerRequestFilter {
             "/favicon.ico", "/robots.txt",
             "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png");
 
-    private final AccountStore accounts;
     private final TokenStore tokens;
     private final Set<String> permitPaths;
 
-    public BasicAuthFilter(AppProps props, AccountStore accounts, TokenStore tokens) {
-        this.accounts = accounts;
+    public BasicAuthFilter(AppProps props, TokenStore tokens) {
         this.tokens = tokens;
         this.permitPaths = Set.of(props.getSecurity().getPermitPaths() == null
                 ? new String[]{"/healthz"} : props.getSecurity().getPermitPaths());
@@ -163,7 +168,8 @@ public class BasicAuthFilter extends OncePerRequestFilter {
 
         String header = req.getHeader("Authorization");
 
-        // Bearer 先判：日常请求都走这条，Basic 只在换令牌和 curl 时出现
+        // Bearer 是唯一被接受的凭证。Basic 换票走的是上面那条白名单，
+        // 压根到不了这里 —— 所以下面那个 Basic 分支只负责说「不行」。
         if (header != null && header.regionMatches(true, 0, "Bearer ", 0, 7)) {
             TokenStore.Principal p = tokens.resolveAccess(header.substring(7).trim());
             if (p != null) {
@@ -178,27 +184,27 @@ public class BasicAuthFilter extends OncePerRequestFilter {
             }
             // token 无效直接 401，不落到下面的 Basic 分支：
             // 带着过期 token 的请求再回头试 Basic 没有意义，前端拿到 401 会自己刷新。
+            //
+            // 这条 WARN 是排查「莫名其妙要重新登录」的唯一线索：它证明请求**确实带了**
+            // 令牌，是服务端不认（被登出、换过库、或签发它的那次进程已经不在了）。
+            // 反过来，如果日志里没有这条、页面却在弹重登，那就是前端根本没把令牌发出来
+            // （本地存储被清）—— 两种情况的修法完全不同，别混。
+            log.warn("Bearer 令牌不被认可：uri={} ua={}", uri, agentOf(req));
             unauthorized(resp);
             return;
         }
 
         if (header != null && header.regionMatches(true, 0, "Basic ", 0, 6)) {
-            try {
-                byte[] got = Base64.getDecoder().decode(header.substring(6).trim());
-                AccountStore.Account acct = accounts.verifyBasic(got);
-                if (acct != null) {
-                    if (!allowed(req, uri, acct.role())) {
-                        deny(resp, acct.role());
-                        return;
-                    }
-                    req.setAttribute(ROLE_ATTR, acct.role());
-                    req.setAttribute(USER_ATTR, acct.user());
-                    chain.doFilter(req, resp);
-                    return;
-                }
-            } catch (IllegalArgumentException ignored) {
-                // Base64 都解不开，直接当认证失败
-            }
+            // Basic 只对 POST /api/auth/token 有意义，而那条路径在上面已经被放行了，
+            // 走不到这里。所以此刻出现的 Basic 一定是「拿密码直连业务接口」——
+            // 收掉它不是洁癖：密码是长期凭证，一旦能直连，令牌的所有作废手段
+            //（登出、旋转、过期）都能被绕过，等于令牌体系白做。
+            //
+            // 文案写成「该怎么做」而不是「认证失败」：老脚本沿用 curl -u 时会拿到这句，
+            // 照着改一步就能跑，不用去翻文档猜哪里错了。
+            log.warn("拒绝 Basic 直连业务接口：uri={} ua={}", uri, agentOf(req));
+            basicRejected(resp);
+            return;
         }
 
         unauthorized(resp);
@@ -224,6 +230,27 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         resp.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         resp.setContentType("text/plain;charset=UTF-8");
         resp.getWriter().write("需要登录");
+    }
+
+    /**
+     * 带着 Basic 打业务接口时的 401。
+     *
+     * <p>和 {@link #unauthorized} 分开写，是为了让「凭证形态不对」和「没有凭证」
+     * 在日志/响应里可区分 —— 前者通常意味着调用方还在用旧姿势，后者才是真的未登录。
+     *
+     * <p>同样**不发** {@code WWW-Authenticate}：理由见 {@link #unauthorized}。
+     */
+    private void basicRejected(HttpServletResponse resp) throws IOException {
+        resp.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        resp.setContentType("text/plain;charset=UTF-8");
+        resp.getWriter().write("Basic 凭证只能用于 POST /api/auth/token，请先换取令牌再用 Bearer 访问");
+    }
+
+    /** 日志里只留 UA 前 60 字：完整 UA 可能很长，排查时前 60 字足够区分浏览器/脚本。 */
+    private static String agentOf(HttpServletRequest req) {
+        String ua = req.getHeader("User-Agent");
+        if (ua == null) return "-";
+        return ua.length() <= 60 ? ua : ua.substring(0, 60);
     }
 
     /** 按角色判断这个请求能不能过。三种角色的差别全收在这一个方法里。 */

@@ -63,10 +63,16 @@ public class NewsController {
     /**
      * 列表接口。三种用法：
      *   GET /api/news                      首屏，按发布时间倒序，默认 10 条
-     *   GET /api/news?since=12345          增量，返回 id 更大的条目（升序）
+     *   GET /api/news?since=12345          增量，返回 id 更大的条目（升序），一次最多 limit 条
      *   GET /api/news?before=12345         向下翻历史，返回 id 更小的条目（倒序）
      *
      * <p>since 与 before 互斥，同时给时 since 优先 —— 增量永远比翻历史更紧急。
+     *
+     * <p><b>游标契约</b>：响应里的 {@code nextSince} 是「这次真的交付出去的最后一条 id」，
+     * 前端只能拿它推进游标；{@code hasMore} 表示游标之后还有积压，需要继续追。
+     * 只在 {@code nextSince} 上推进是这套契约的全部要害 —— 换成「全局最大 id」就会
+     * 在积压超过一页时把没交付的条目直接跳过（见 {@link com.herc.clsnews.store.NewsStore#since}）。
+     * {@code maxId} 仍然返回，但只是为了兼容还没升级的老客户端，前端不再用它推进游标。
      */
     @GetMapping("/news")
     public Map<String, Object> news(@RequestParam(defaultValue = "10") int limit,
@@ -76,26 +82,34 @@ public class NewsController {
         int n = Math.max(1, Math.min(limit, 200));
         List<News> rows;
         boolean hasMore;
+        long nextSince;
         if (since > 0) {
-            // 增量不分页：积压多少一次取走，免得前端还要循环追
             rows = store.since(since, n);
-            hasMore = false;
+            // 空页时游标原地不动：退回 since 而不是 0，否则「没有新条目」会被当成「从头开始」
+            nextSince = rows.isEmpty() ? since : rows.get(rows.size() - 1).id();
+            // 按 hasMore 继续追是前端的责任，这里只如实回答「后面还有没有」
+            hasMore = store.hasAfter(nextSince);
         } else if (before > 0) {
             rows = store.before(before, n);
             // 只有取满一页才可能还有；不满一页说明到底了
             hasMore = rows.size() >= n && store.countBefore(before) > rows.size();
+            // 翻历史不推进增量游标：这一页是更旧的内容，拿它当游标会把中间一大段判成「已看过」
+            nextSince = 0;
         } else {
             rows = store.latest(n);
             hasMore = store.count() > rows.size();
+            // 首屏：本页最大 id 就是「已经给用户看过的最新位置」。
+            // 不是全局最大 id —— 那等于替用户承认了没交付的那部分。
+            nextSince = rows.stream().mapToLong(News::id).max().orElse(0);
         }
         List<NewsView> items = rows.stream().map(this::toView).toList();
 
-        // 游标用全局最大 id，而不是本页最大值：首屏只取 10 条时，
-        // 本页最大值可能小于库里真实最大值，下一轮会把已展示的条目当新增再发一遍。
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("items", items);
-        body.put("maxId", store.maxId());
+        body.put("nextSince", nextSince);
         body.put("hasMore", hasMore);
+        // 保留字段：老前端拿它当游标，去掉会让还没刷新的页面直接不增量
+        body.put("maxId", store.maxId());
         body.put("serverTime", Instant.now().getEpochSecond());
         body.put("stats", stats(roleOf(req)));
         return body;
@@ -145,19 +159,11 @@ public class NewsController {
     }
 
     /**
-     * 把用户输入编成 LIKE 模式，同时转义 LIKE 自己的通配符。
-     *
-     * <p>不转义会让人觉得「搜索在瞎匹配」：搜 {@code 100%} 会变成「100 后面随便什么」，
-     * 搜 {@code a_b} 会命中 {@code axb}。这不涉及注入（值仍然是绑定参数），
-     * 但会让搜索结果不可信。
-     *
-     * <p>顺序不能反：反斜杠必须先转，否则后面新插入的转义符会被二次转义。
+     * 把用户输入编成 LIKE 模式。实现与转义的坑见 {@link LikePattern} ——
+     * 抽出去只是为了让测试能直接断言「搜 100% 不会命中 100 元」。
      */
     private static String likePattern(String raw) {
-        String s = raw.replace("\\", "\\\\")
-                .replace("%", "\\%")
-                .replace("_", "\\_");
-        return "%" + s + "%";
+        return LikePattern.of(raw);
     }
 
     @GetMapping("/news/{id}")

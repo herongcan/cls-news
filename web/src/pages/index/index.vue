@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue'
-import { onMounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onAppHide, onAppShow, onPullDownRefresh, onReachBottom } from '@dcloudio/uni-app'
 import NewsItem from '@/components/NewsItem.vue'
 import { useNewsFeed } from '@/composables/useNewsFeed'
@@ -36,6 +35,15 @@ const kwInput = ref('')
 const form = ref({ u: '', p: '' })
 const gateErr = ref('')
 const gateBusy = ref(false)
+/**
+ * 会话中途失效时的重登浮层。
+ *
+ * <p>和启动登录层（form）分开两套状态：那边的密码输到一半、退出后不该带到重登框；
+ * 反过来也一样。共用一套的话，退出再登入时会看到一个残留的密码。
+ */
+const reForm = ref({ u: '', p: '' })
+const reErr = ref('')
+const reBusy = ref(false)
 let debounce: ReturnType<typeof setTimeout> | null = null
 
 const stats = computed(() => auth.stats)
@@ -85,6 +93,7 @@ const moreText = computed(() => {
 })
 
 onMounted(async () => {
+  auth.watchSession()
   try {
     await auth.boot()
   } catch (e) {
@@ -98,6 +107,21 @@ onMounted(async () => {
     startPolling()
   }
 })
+
+/**
+ * 浮层弹出时预填账号、清空密码。
+ *
+ * <p>密码不预填是底线：它从来就没落过本地（这是当初换掉「每次请求带 Basic」的全部理由），
+ * 也就不存在「方便地自动重登」—— 会话过期就是得再输一次。
+ */
+watch(
+  () => auth.needLogin,
+  (v) => {
+    if (!v) return
+    reForm.value = { u: auth.lastUser || auth.user, p: '' }
+    reErr.value = ''
+  }
+)
 
 // 切后台时停掉轮询：手机上一直发请求既费电，也没人看
 onAppHide(() => setVisible(false))
@@ -142,6 +166,44 @@ async function submitLogin(): Promise<void> {
 function doLogout(): void {
   stopPolling()
   auth.logout()
+  items.value = []
+  kwInput.value = ''
+}
+
+/**
+ * 原地重登。
+ *
+ * 成功后**不重新加载列表**：断掉的那些请求在 http 层挂着，登录一成功就会带着新令牌
+ * 自己重放，拿回来的正是断点处的数据。这里再 reload 一次，反而会把 items 整个替换掉、
+ * 滚动位置冲回顶部 —— 那正是挑「浮层」而不是「切回全屏登录页」想避免的事。
+ */
+async function submitRelogin(): Promise<void> {
+  const u = reForm.value.u.trim()
+  if (!u) {
+    reErr.value = '请输入账号'
+    return
+  }
+  reBusy.value = true
+  reErr.value = ''
+  try {
+    await auth.relogin(u, reForm.value.p)
+    reForm.value.p = ''
+  } catch (e) {
+    reErr.value = e instanceof ApiError ? e.message : '登录失败'
+  } finally {
+    reBusy.value = false
+  }
+}
+
+/**
+ * 不登了，回全屏登录层。
+ *
+ * 挂起的请求必须一并放掉（quitRelogin 里做），否则它们要悬满两分钟才超时，
+ * 期间每次轮询都会再挂一个上去。
+ */
+function quitToGate(): void {
+  stopPolling()
+  auth.quitRelogin()
   items.value = []
   kwInput.value = ''
 }
@@ -289,6 +351,32 @@ function dismissNotice(): void {
       </view>
 
       <view class="more" :class="state" @tap="onMoreTap">{{ moreText }}</view>
+
+      <!--
+        会话中途失效的浮层。
+        和启动登录层的区别：列表还在下面，滚动位置没动。登录成功后 http 层
+        会把断掉的请求重放，页面不需要 reload。
+      -->
+      <view v-if="auth.needLogin" class="relogin">
+        <view class="relogin-card">
+          <view class="gate-title">登录已过期</view>
+          <view class="gate-sub">重新登录后，列表会停在原处自动续上</view>
+          <input v-model="reForm.u" class="inp" placeholder="账号" autocomplete="username" />
+          <input
+            v-model="reForm.p"
+            class="inp"
+            password
+            placeholder="密码"
+            autocomplete="current-password"
+            @confirm="submitRelogin"
+          />
+          <view class="gate-btn" :class="{ busy: reBusy }" @tap="submitRelogin">
+            {{ reBusy ? '验证中…' : '重新进入' }}
+          </view>
+          <view class="gate-err">{{ reErr }}</view>
+          <view class="gate-quit" @tap="quitToGate">退出登录</view>
+        </view>
+      </view>
     </template>
   </view>
 </template>
@@ -617,6 +705,46 @@ function dismissNotice(): void {
   color: var(--dim);
   border-top: 0.5px solid var(--line);
   padding-top: 10px;
+}
+
+/* ---------- 会话失效浮层 ---------- */
+/* 盖在原页面上，不用 v-if 换掉整棵列表：换掉就等于把滚动位置也扔了。
+   背景压暗而不是全遮，是为了让人看得出来「东西还在下面」。 */
+.relogin {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10, 11, 13, 0.72);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+.theme-light .relogin {
+  background: rgba(250, 249, 246, 0.78);
+}
+.relogin-card {
+  width: 100%;
+  max-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--panel);
+  border: 0.5px solid var(--line-2);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+}
+.gate-quit {
+  margin-top: 2px;
+  padding: 6px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--dim);
+  border-top: 0.5px solid var(--line);
+  cursor: pointer;
 }
 .mono {
   color: var(--muted);

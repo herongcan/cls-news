@@ -23,8 +23,9 @@ import java.util.Map;
  * 放数据库的唯一好处是能在线改密码，代价是一个私用工具多了一张表和一套后台，
  * 不划算 —— 改密码的方式就是改 {@code .env} 再重启。
  *
- * <p>命令行 {@code curl -u} 继续可用，这是刻意的：token 是给浏览器用的，
- * 运维排查不该被迫先换一次 token。
+ * <p>命令行 {@code curl -u} 仍可用，但只能用于 {@code POST /api/auth/token} 换令牌 ——
+ * 密码不再能直连业务接口（见 {@link BasicAuthFilter} 的类注释），
+ * 所以运维排查是「换一次票，然后一直带 Bearer」。
  */
 @Component
 @ConditionalOnProperty(prefix = "app.security", name = "enabled", havingValue = "true")
@@ -66,6 +67,13 @@ public class AccountStore {
                 user,
                 namesOf(map, BasicAuthFilter.ROLE_GUEST),
                 namesOf(map, BasicAuthFilter.ROLE_RO));
+
+        // 默认口令是已知的（写在 application.yml 与登录页上），上线不换等于把门开着。
+        // 只告警不拒绝启动：这是十来个同事共用的内网工具，硬拦会让人为了「先跑起来」
+        // 去改代码跳过检查，反而更糟。但要留一条显眼的日志，做安全排查时能对得上时间。
+        if ("admin".equals(pass)) {
+            log.warn("主账号 {} 仍在使用默认密码 admin —— 放到公网前务必用 APP_PASSWORD 覆盖", user);
+        }
     }
 
     private static Account account(String user, String pass, String role) {

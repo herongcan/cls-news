@@ -36,6 +36,17 @@
             <artifactId>sqlite-jdbc</artifactId>
             <version>${sqlite.version}</version>
         </dependency>
+        <!--
+            只引 starter-test 的 JUnit 5 + AssertJ + MockMvc，不写 @SpringBootTest：
+            起全容器会真的跑 @Scheduled 的采集和分析任务，还得塞假 key。
+            store/过滤器这些被测对象直接用真实的 JdbcTemplate + 临时 sqlite 文件构造，
+            毫秒级，也不会有不相干的 Bean 把失败原因搅浑。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

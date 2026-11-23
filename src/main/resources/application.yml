@@ -74,7 +74,8 @@ app:
     username: ${APP_USER:admin}
     # 默认 admin/admin。这是十来个同事共用的内网工具，密码说好一个固定的就够了，
     # 每次部署随机生成反而会逼所有人把密码抄在便签上，安全性并不会更高。
-    # 代价是：知道地址的人试一下就能进。公网环境下至少改一位，或用 APP_PASSWORD 覆盖。
+    # 代价是：知道地址的人试一下就能进 —— 所以换票有失败限流（见下面 login-*），
+    # 且启动时若密码仍是 admin 会打一条 WARN。公网环境请用 APP_PASSWORD 覆盖。
     # 注意 APP_PASSWORD 显式设成空字符串**不会**回落到这个默认值，而是直接启动失败——
     # 「以为开了鉴权、其实密码是空串」比明说没开更危险。
     password: ${APP_PASSWORD:admin}
@@ -84,7 +85,7 @@ app:
     # 游客账号，格式 user:pass（多个用逗号分隔，环境变量 APP_GUEST）。
     # 能点「分析」，受 guest-daily-cap 约束；访客数据整个不可见。
     # 密码公开写在登录页上，止损线就是 guest-daily-cap（0 = 关闭）。
-    guest: ${APP_GUEST:}
+    guest: ${APP_GUEST:guest:guest}
     guest-daily-cap: ${APP_GUEST_DAILY_CAP:10}
     permit-paths:
       - /healthz
@@ -93,9 +94,21 @@ app:
     # 前面有反向代理 / 隧道时必须 true，否则所有访客算成同一个 IP。
     trust-forwarded-headers: ${APP_TRUST_XFF:false}
     # 令牌有效期。access 短（它才是每个请求都带的东西），refresh 长（决定多久要重新输密码）。
-    # 令牌存内存，容器重启后全部失效，前端会自动回到登录层。
+    # 令牌存 auth_token 表（SQLite），**重启不失效** —— 容器滚动更新、改配置重启都不会
+    # 把用户踢下线。代价只是每次校验多一次主键查询。access 短是因为它每个请求都要带；
+    # refresh 长，且一次性旋转（旧的在 30 秒宽限内还能用，避免多标签互相踢）。
     token-access-ttl: ${APP_TOKEN_ACCESS_TTL:30m}
     token-refresh-ttl: ${APP_TOKEN_REFRESH_TTL:7d}
+    # 换令牌的失败限流（POST /api/auth/token 是全站唯一校验密码的地方）。
+    # 按「IP + 用户名」组合计数：连续 login-max-fails 次失败就锁 login-lock，
+    # 锁只作用于这个组合 —— 同 IP 的另一个账号、或同账号从别的 IP 都不受影响，
+    # 这样既挡得住暴力破解，也不会被人用错密码把 admin 全站锁死。
+    # 每次失败还会先等 login-fail-delay × 2^(n-1)（封顶 login-max-delay）再回 401。
+    # 计数在内存里，重启清零 —— 攻击者无法让服务重启，所以不是绕过。
+    login-max-fails: ${APP_LOGIN_MAX_FAILS:5}
+    login-lock: ${APP_LOGIN_LOCK:15m}
+    login-fail-delay: ${APP_LOGIN_FAIL_DELAY:200ms}
+    login-max-delay: ${APP_LOGIN_MAX_DELAY:2s}
 
 logging:
   level:

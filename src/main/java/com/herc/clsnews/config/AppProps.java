@@ -90,6 +90,20 @@ public class AppProps {
          */
         private java.time.Duration tokenRefreshTtl = java.time.Duration.ofDays(7);
 
+        /**
+         * 换令牌连续失败几次后锁定。按 {@code ip|user} 组合计数，锁只作用于这个组合。
+         *
+         * <p>默认 5：正常人打错密码很少连错五次，而脚本五次之后就该被挡住。
+         * 设成 0 或负数会被 {@code LoginThrottle} 抬到 1（等于错一次就锁）。
+         */
+        private int loginMaxFails = 5;
+        /** 锁定时长。15 分钟是「够让攻击者放弃、又不至于让忘了密码的人等一整天」的折中。 */
+        private java.time.Duration loginLock = java.time.Duration.ofMinutes(15);
+        /** 第 1 次失败先等多久。之后每次翻倍，封顶见 {@link #loginMaxDelay}。 */
+        private java.time.Duration loginFailDelay = java.time.Duration.ofMillis(200);
+        /** 失败延迟上限。别设太大：占的是 Tomcat 工作线程。 */
+        private java.time.Duration loginMaxDelay = java.time.Duration.ofSeconds(2);
+
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getUsername() { return username; }
@@ -110,6 +124,14 @@ public class AppProps {
         public void setTokenAccessTtl(java.time.Duration d) { this.tokenAccessTtl = d; }
         public java.time.Duration getTokenRefreshTtl() { return tokenRefreshTtl; }
         public void setTokenRefreshTtl(java.time.Duration d) { this.tokenRefreshTtl = d; }
+        public int getLoginMaxFails() { return loginMaxFails; }
+        public void setLoginMaxFails(int v) { this.loginMaxFails = v; }
+        public java.time.Duration getLoginLock() { return loginLock; }
+        public void setLoginLock(java.time.Duration d) { this.loginLock = d; }
+        public java.time.Duration getLoginFailDelay() { return loginFailDelay; }
+        public void setLoginFailDelay(java.time.Duration d) { this.loginFailDelay = d; }
+        public java.time.Duration getLoginMaxDelay() { return loginMaxDelay; }
+        public void setLoginMaxDelay(java.time.Duration d) { this.loginMaxDelay = d; }
     }
 
     public static class Display {

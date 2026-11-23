@@ -9,8 +9,16 @@ const POLL_INTERVAL = 3000
 const POLL_MAX = 20
 /** 列表静默增量：30 秒拉一次新条目。采集端 90 秒一轮，比它快一档才能做到「几乎实时」 */
 const REFRESH_MS = 30000
-/** 增量不分页，一次取走上限。积压通常个位数，给 50 是防长时间挂后台后回来 */
+/** 增量一次取多少条。后端也按这个上限截断，所以「积压超过一页」是常态，不是异常 */
 const REFRESH_LIMIT = 50
+/**
+ * 一轮增量最多追几次。
+ *
+ * 积压（停机、锁屏、批量补数据）超过一页时，靠 `hasMore` 继续追同一个游标，
+ * 直到后端说没有了。设上限是为了不让一个坏掉的 hasMore 把网络打成死循环；
+ * 追不完不要紧 —— 游标停在真正交付到的位置，下一轮 30 秒接着追。
+ */
+const REFRESH_ROUNDS = 5
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -36,8 +44,14 @@ export function useNewsFeed() {
   /** 分析触发失败之类的临时提示，与列表加载失败区分开 */
   const notice = ref('')
   const analyzing = ref<number[]>([])
-  /** 服务端返回的全局最大 id，增量拉取的游标 */
-  const maxId = ref(0)
+  /**
+   * 增量游标 = 后端交付过的最后一条 id（响应里的 `nextSince`）。
+   *
+   * 以前这里存的是全局最大 id，配合「一次只取 50 条」，停机或锁屏回来积压超过 50 条时
+   * 游标会直接跳到最末尾，中间那批永远不会再被拉到 —— 表现为「少了几条，手动刷新才回来」。
+   * 现在只推进到真正拿到的位置，没拿到就不动。
+   */
+  const nextSince = ref(0)
   /** 搜索命中总数；列表模式下恒为 0，不显示 */
   const matched = ref(0)
   let requestSeq = 0
@@ -79,7 +93,11 @@ export function useNewsFeed() {
       if (my !== requestSeq) return
       items.value = page.items
       hasMore.value = page.hasMore
-      maxId.value = page.maxId
+      // 只有信息流才推进增量游标。搜索结果是另一条时间线，拿它推进会让
+      // 「搜索期间到达的新条目」在退出搜索后被当成已看过 —— 那正是另一条丢条路径。
+      if (!keyword.value) {
+        nextSince.value = page.nextSince ?? 0
+      }
       matched.value = keyword.value ? page.total ?? page.items.length : 0
       // 搜索结果不带 stats：这时不能把顶栏清成 0，否则「已收录 0 条」会一直挂着
       if (page.stats) {
@@ -126,27 +144,58 @@ export function useNewsFeed() {
    *
    * 为什么不是简单重跑 reload：重跑会把用户已经滚动翻到第 5 页的列表整体替换掉，
    * 屏幕会跳回顶部。只往前插，翻页游标和滚动位置都不受影响。
+   *
+   * 三段容易写错的逻辑，都是真的踩过：
+   *   1. **游标只能推到 `nextSince`**（后端交付到的最后一条），不能推到全局 maxId。
+   *      maxId 意味着「没拿到的那部分也算看过了」，积压超过一页时会静默丢条目。
+   *   2. **`hasMore` 要追**。后端一次最多 50 条，锁屏两分钟就有两轮采集（最多 100 条），
+   *      只取一次等于丢掉后半段。追的时候用同一个游标往后走，追不完下一轮接着追。
+   *   3. **顺序要反转**。后端按 id 升序返回（旧的在前），列表是新的在上，
+   *      直接 concat 会让同一批里更早发布的那条显示在上面。批量小的时候看不出来，
+   *      补一批 30 条就很明显。
    */
   async function pullNewer(silent = true): Promise<void> {
     // 搜索模式下不插队：插进来的新条目不属于这次搜索，会让人以为关键词匹配错了
     if (keyword.value || loading.value || loadingMore.value) return
-    const since = maxId.value
-    if (!since) return
+    if (!nextSince.value) return
     const my = requestSeq
+    const seen = new Set(items.value.map((x) => x.id))
+    // 跨轮收集，最后一次性反转：分轮反转会把轮次顺序也翻掉
+    const fresh: NewsItem[] = []
+    // 游标先记在局部变量里，等条目真的并进列表了再提交。
+    // 边追边提交会留下一个更隐蔽的丢条口子：第三轮网络断了，
+    // 游标已经推进到第二轮的末尾，而那一批还在 fresh 里没进列表 ——
+    // 下次轮询从新游标开始，第二轮那批永远不会回来。
+    let cursor = nextSince.value
     try {
-      const page = await fetchNewer(since, REFRESH_LIMIT)
-      if (my !== requestSeq) return
-      maxId.value = page.maxId
-      if (page.stats) {
-        stats.value = page.stats
-        const auth = useAuth()
-        if (auth.logged) auth.stats = page.stats
+      for (let round = 0; round < REFRESH_ROUNDS; round++) {
+        const page = await fetchNewer(cursor, REFRESH_LIMIT)
+        if (my !== requestSeq) return
+
+        if (page.stats) {
+          stats.value = page.stats
+          const auth = useAuth()
+          if (auth.logged) auth.stats = page.stats
+        }
+
+        // 后端没给 nextSince（老版本）时退回到本页最大 id：至少不比「全局 maxId」更差
+        const last = page.nextSince ?? page.items.reduce((m, x) => Math.max(m, x.id), cursor)
+        // 游标没有前进就停：要么真没新条目，要么后端没按契约回，继续追只是空转
+        if (last <= cursor) break
+        cursor = last
+
+        for (const it of page.items) {
+          if (seen.has(it.id)) continue
+          seen.add(it.id)
+          fresh.push(it)
+        }
+        if (!page.hasMore) break
       }
-      if (!page.items.length) return
-      const seen = new Set(items.value.map((x) => x.id))
-      const fresh = page.items.filter((x) => !seen.has(x.id))
+      if (cursor === nextSince.value) return
+      nextSince.value = cursor
       if (!fresh.length) return
-      items.value = fresh.concat(items.value)
+      // id 升序 → 反转成新的在上
+      items.value = fresh.reverse().concat(items.value)
     } catch (e) {
       // 静默轮询失败不弹提示：网络抖一下就红字，比不刷新更烦人
       if (!silent) notice.value = e instanceof ApiError ? e.message : '刷新失败'
@@ -221,7 +270,7 @@ export function useNewsFeed() {
     notice,
     analyzing,
     matched,
-    maxId,
+    nextSince,
     state,
     cursor,
     reload,

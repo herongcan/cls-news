@@ -16,8 +16,10 @@ export function fetchBefore(before: number, limit = 10): Promise<NewsPage> {
 }
 
 /**
- * 增量：id 更大的新条目（since = 当前已展示的最大 id）。
- * 后端遇到 since 不分页，一次把积压的都返回，所以这里给足 limit。
+ * 增量：id 更大的新条目。`since` 传上一次响应里的 `nextSince`。
+ *
+ * 后端一次最多回 limit 条，`hasMore` 为真说明还有积压；调用方要按
+ * `nextSince` 继续追，**不能**用 `maxId` 直接跳到底 —— 那会把没拿到的那段永久跳过。
  */
 export function fetchNewer(since: number, limit = 50): Promise<NewsPage> {
   return request<NewsPage>('/api/news', { query: { limit, since } })

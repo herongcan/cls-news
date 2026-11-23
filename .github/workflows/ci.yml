@@ -114,8 +114,12 @@ jobs:
           key: mvnw-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
           restore-keys: mvnw-${{ runner.os }}-
 
-      - name: 打包
-        run: ./mvnw -B -DskipTests package
+      # 单元测试与打包一起跑。`mvn package` 默认就会执行 test 阶段，
+      # 所以这一条既是老行为（出 jar）又是新门禁（47 个回归用例）——
+      # 千万别再顺手加上 -DskipTests：跳过之后这个 job 依然是绿的，
+      # 而状态机、游标、配额这些最危险的回归一条都拦不住。
+      - name: 单元测试 + 打包
+        run: ./mvnw -B package
 
       - name: 校验是 Spring Boot fat jar
         run: |

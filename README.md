@@ -82,7 +82,7 @@ docker compose up -d                  # 默认只绑 127.0.0.1，端口 HOST_POR
 |---|---|---|
 | GET | `/healthz` | **唯一免鉴权**。真读一次库，UP 返回 200 / DOWN 返回 503 |
 | GET | `/api/news?limit=10` | 首屏，按发布时间倒序（`limit` 夹在 1~200） |
-| GET | `/api/news?since=<maxId>&limit=200` | 增量，返回 id 更新的条目（升序） |
+| GET | `/api/news?since=<nextSince>&limit=50` | 增量，返回 id 更新的条目（**id 升序**），一次最多 `limit` 条 |
 | GET | `/api/news?before=<minId>&limit=10` | 向下翻历史，返回 id 更小的条目（倒序） |
 | GET | `/api/news/search?q=关键词&limit=10` | 标题 + 正文 LIKE 搜索，结构与 `/api/news` 对齐 |
 | GET | `/api/news/{id}` | 单条 |
@@ -95,7 +95,31 @@ docker compose up -d                  # 默认只绑 127.0.0.1，端口 HOST_POR
 | GET | `/api/visits/logs` | 访客明细（IP / UA / 设备 / 时间），支持 `day` `ip` `device` 过滤与 `format=csv`。**游客与只读账号访问返回 403** |
 
 `/api/news` 的响应里带 `stats`，页面只发一个请求就能同时更新列表和状态栏。
-页面每 30 秒拉一次增量（`limit=200`，不分页），首屏和翻页各取 10 条。
+页面每 30 秒拉一次增量（`limit=50`），首屏和翻页各取 10 条。
+
+### 游标契约（`nextSince` / `hasMore`）
+
+```
+GET /api/news?since=X&limit=N
+→ items[]     id 升序（按 id 排，不按 publish_time）
+  nextSince   这次真正交付出去的最后一条 id；items 为空时原样返回 X
+  hasMore     游标之后还有没有积压
+  maxId       全局最大 id，仅为兼容老客户端保留，**不要拿它推进游标**
+```
+
+**为什么不能用 `maxId` 当游标**：一次最多只返回 `N` 条，而 `maxId` 是库里最新那条。
+拿它推进等于「没拿到的那部分也算看过了」—— 停机、锁屏、批量补数据之后积压超过一页时，
+中间那段再也不会被拉，表现为「少了几条，手动刷新才回来」。`nextSince` 只推进到真正交付的位置，
+`hasMore` 为真就继续追（前端最多追 5 轮，追不完下一轮接着追）。
+
+**为什么 `since` 的排序键必须是 id**：过滤条件是 `id > ?`，排序若按 `publish_time`，
+一页装不下时「本页最后一条」和「本页最大 id」就不是同一行 —— 回填的老消息 id 大、发布时间小，
+排最前面把一页占满，游标落在它身上，中间那批被永久跳过。这条有专门的回归用例
+（`NewsStoreCursorTest`），别「顺手优化」回去。
+
+**前端只推进到真正交付的位置**：搜索期间不插队也不推进游标，退出搜索时重新拉首屏。
+代价是增量窗口内按「入库顺序」呈现，回填的旧消息会短暂跳到最上面一次，下一次整屏刷新恢复。
+
 
 ### 访客明细：直接用 curl 看
 
@@ -439,7 +463,7 @@ ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
 
 ### 运行一次会看到什么
 
-1. `./mvnw -B -DskipTests package`（首次约 2 分钟，有 Maven 缓存后 40 秒左右）
+1. `./mvnw -B package`（含 47 个单元测试；首次约 2 分钟，有 Maven 缓存后 40 秒左右）
 2. 校验 `target/cls-news-0.1.0.jar` 是 Spring Boot fat jar（否则服务器上会报
    `no main manifest attribute`，得翻半天日志）
 3. `ssh-keyscan` 写 `known_hosts`（不用 `StrictHostKeyChecking=no`，那个等于关掉中间人防护）
@@ -541,14 +565,28 @@ src/main/java/com/herc/clsnews/
     ├── NewsController.java      /api/news|search|analysis|status|visits（9 个接口）
     ├── VisitController.java     /api/visit/ping
     ├── HealthController.java    /healthz（唯一免鉴权）
-    ├── BasicAuthFilter.java     HTTP Basic，白名单 + 常量时间比较
+    ├── BasicAuthFilter.java     Bearer / Basic 两路鉴权，白名单 + 角色矩阵 + 路径穿越检查
+    ├── AccountStore.java        内存账号表（rw / guest / ro），常数时间比较
+    ├── TokenStore.java          内存令牌表：签发、校验、一次性旋转、按 session 作废
+    ├── AuthController.java      /api/auth/token|refresh|logout
+    ├── LikePattern.java         用户输入 → LIKE 模式（通配符转义）
     ├── ClientIp.java            取真实 IP（默认不信 XFF）
     └── UserAgent.java           UA → device / os / browser，纯静态零依赖
 
 src/main/resources/
-├── static/index.html            整页，无构建、无 CDN（登录层也在这里）
+├── static/                     前端构建产物（index.html + assets/，旧版留作 legacy.html 回滚入口）
 ├── prompts/analyze-news.md      提示词 + 输出结构（改这里就够了）
-└── schema.sql                   建表（news / visit / access_log）
+└── schema.sql                   建表（news / analysis_call / visit / visitor / access_log）
+
+src/test/java/com/herc/clsnews/
+├── store/NewsStoreCursorTest    游标边界：since 排序键、截断、翻页不重不漏
+├── store/NewsStoreClaimTest     分析状态迁移 + 两线程抢同一条
+├── web/LikePatternTest          % _ \ 转义，以及「搜 100% 不该命中 100 元」
+├── web/AuthMatrixTest           rw / guest / ro × 各端点，401 不带 challenge
+├── web/NewsApiCursorTest        /api/news 的 nextSince / hasMore 契约
+├── web/AnalysisJsonTest         analysis_json 脏数据、少字段、截断
+├── ai/QuotaTest                 游客额度 / 全站上限 / 按 actor 计数 / 跨天
+└── support/                     临时 sqlite + standalone MockMvc 测试台
 
 deploy/
 ├── cloud/                       云上那一套：deploy.sh、backup.sh、restore.sh、systemd timer
@@ -556,6 +594,41 @@ deploy/
 
 tools/eval/                      分析质量评估：labels.csv 人工标注 + score.py 打分
 ```
+
+---
+
+## 测试
+
+```bash
+./mvnw test                    # 47 个用例，约 3 秒
+./mvnw test -Dtest=NewsApiCursorTest   # 只跑游标那一组
+```
+
+**不起 `@SpringBootTest`。** 起全容器会让 `@Scheduled` 的采集与分析任务真的跑起来（要假 key、
+会真花钱），失败原因还会被一堆 Bean 初始化日志埋掉。现在的做法是：`store` 与过滤器用真实
+`JdbcTemplate` + `@TempDir` 里的临时 sqlite 构造，接口层用 standalone `MockMvc` 直接挂
+`NewsController`，只把「会联网的那两个」（`IngestJob` / `NewsSource`）换成假对象。
+
+**建表直接执行生产用的 `schema.sql`**，不手抄一份 —— 抄一份的话 schema 改了测试还是绿的。
+
+| 用例 | 钉住什么 |
+|---|---|
+| `NewsStoreCursorTest` | `since` 的过滤键是 id，排序键也必须是 id；截断时游标落在已交付那条；`before` 翻页不重不漏 |
+| `NewsApiCursorTest` | 积压超过一页时 `nextSince` 停在交付处（**不是全局 `maxId`**）；空页游标原地不动；`before` 不碰增量游标 |
+| `NewsStoreClaimTest` | `claimOne` / `claimPending` / `resetStuck` / `releaseClaims` 的状态迁移；两个线程抢同一条只有一个成功 |
+| `LikePatternTest` | `%` `_` `\` 转义，以及「搜 `100%` 不该命中 `100元`」（只断言字符串不够，要真查库） |
+| `QuotaTest` | 游客 10 条封顶、全站上限对所有人、按 actor 分开计数、跨天清零 |
+| `AuthMatrixTest` | rw / guest / ro × 各端点；**任何 401 都不带 `WWW-Authenticate`**；白名单不能被 `..` / `%2f` 绕过 |
+| `AnalysisJsonTest` | 脏 JSON 只影响那一条、少字段照常渲染、`/api/analysis/state` 不整条 500 |
+
+**怎么确认这些测试真的有用**：把实现改回旧写法，看它是不是红的。实测两次：
+
+```
+since 改回 ORDER BY publish_time  → NewsStoreCursorTest 2 条红（expected 2,3 / was 3,2）
+游标改回 store.maxId()            → NewsApiCursorTest 1 条红（nextSince 期望 52，实际 62）
+```
+
+改回去再跑就全绿 —— 说明断言咬的是行为，不是「代码长什么样」。
 
 ---
 
@@ -569,7 +642,7 @@ tools/eval/                      分析质量评估：labels.csv 人工标注 + 
 | 1 | **把访问密码从 `admin/admin` 换掉** | 现在知道地址的人试一下就能进，而里面是财联社全文。改密码要改 `.env` 的 `APP_PASSWORD` 再重新部署 —— 没有热更新，因为 `BasicAuthFilter` 的 `doFilter` 是 `final`，CGLIB 代理不到，配置中心的刷新对它无效 |
 | 2 | **备份改小时级 + 加异地副本** | 现在 RPO 24 小时，且备份和原库在同一台机器上，机器挂了等于没备份 |
 | 3 | **`fulltext` 改 `false`** | 让性质从「小范围转载」退回「索引」，见上面合规那节 |
-| 4 | **补测试** | `src/test` 现在是空的。想换数据库（比如以后上 RDS PG）之前必须先有回归，否则改 SQL 全靠手点 |
+| 4 | **换库之前先扩测试** | `src/test` 已有 47 个用例（游标边界 / 状态迁移 / 并发抢锁 / LIKE 转义 / 配额 / 权限矩阵 / JSON 兜底），CI 里 `./mvnw package` 会执行。但这些只覆盖 store 与 filter，`IngestJob`、`AnalysisWorker`、`ClsApiSource` 的解析还没有用例 —— 想换数据库或改采集协议之前得先补上这些 |
 | 5 | 隧道链路太慢 | 迁香港/新加坡轻量（域名直接 A 记录 + Caddy 自动签证书），或把 ICP 备案办下来走境内直连。两者都要改 `BIND_ADDR=127.0.0.1` 并收掉安全组的 8080 |
 | 6 | 清理 `visit` 表的历史脏数据 | 79 条里有 66 个是只来过一次的扫描器 IP（旧拦截器口径留下的），要不要删需要你拍板 |
 

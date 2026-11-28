@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -128,6 +129,156 @@ class AgentServiceTest {
         // 拒答也要留痕：否则用户说"点了没反应"时无法回答为什么
         assertEquals("rejected", jdbc.queryForObject(
                 "SELECT status FROM agent_run WHERE id = ?", String.class, r.runId()));
+    }
+
+    @Test
+    @DisplayName("生成成功时过程写进库：按 runId 读回来能解释结论怎么来的")
+    void stepsExplainWhereTheAnswerCameFrom() {
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+
+        AgentService.Result r = service.ask("hot-today", null, "admin", null);
+
+        List<String> keys = r.steps().stream().map(Step::k).toList();
+        for (String k : List.of("scan", "pack", "guard", "llm", "cite")) {
+            assertTrue(keys.contains(k), "缺少步骤 " + k + "：" + keys);
+        }
+
+        // 关键：过程落在库里，而不是只挂在这一份返回值上 ——
+        // 换台设备按 runId 读、或第二天回看，都还要看得到
+        AgentService.Result back = service.snapshot(r.runId()).orElseThrow();
+        assertEquals(r.steps(), back.steps());
+    }
+
+    @Test
+    @DisplayName("拒答也留过程：停在材料校验，hint 就是拒答原因")
+    void rejectedRunKeepsSteps() {
+        seed(2);  // hot-today 的 min-hits 是 5
+
+        AgentService.Result r = service.ask("hot-today", null, "admin", null);
+
+        Step guard = r.steps().stream()
+                .filter(s -> "guard".equals(s.k()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("拒答路径没有 guard 步骤：" + r.steps()));
+        assertEquals("不足", guard.value());
+        assertTrue(guard.hint().contains("至少需要 5 条"), guard.hint());
+        assertEquals(r.steps(), service.snapshot(r.runId()).orElseThrow().steps());
+    }
+
+    @Test
+    @DisplayName("流式：sink 按顺序收到每一步，模型那步先「等待中」再变成耗时")
+    void sinkSeesStepsInOrder() {
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+
+        List<Step> pushed = new ArrayList<>();
+        AgentService.Result r = service.ask("hot-today", null, false, "admin", null, pushed::add);
+
+        // 模型那一步是唯一会推两次的：先占位「等待中」，回来再覆盖成耗时。
+        // 断言两次都推了 —— 少了第一次，界面上那十几秒就是一片空白
+        long waiting = pushed.stream().filter(s -> "llm".equals(s.k()) && "等待中".equals(s.value())).count();
+        assertEquals(1, waiting, "没有推「等待中」：" + pushed);
+        assertEquals("llm", pushed.get(pushed.size() - 2).k());
+        assertNotEquals("等待中", pushed.get(pushed.size() - 2).value());
+
+        // 推出去的最后一份，必须和落库的那份完全一致：否则"界面看到的"和
+        // "事后按 runId 查到的"是两套数字，而排障时人只会信后者
+        assertEquals(r.steps(), lastByKey(pushed));
+        assertEquals(r.steps(), service.snapshot(r.runId()).orElseThrow().steps());
+    }
+
+    @Test
+    @DisplayName("流式：客户端断开（sink 抛异常）不能把这次生成带崩")
+    void sinkFailureDoesNotBreakGeneration() {
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+
+        AgentService.Result r = service.ask("hot-today", null, false, "admin", null, s -> {
+            throw new IllegalStateException("客户端已断开");
+        });
+
+        // 断开发生在取数之后、模型之前。钱一旦花出去，结论就必须落库 ——
+        // 若让它连着失败，用户付了费却什么都没留下，下次还得再付一次
+        assertEquals("succeeded", r.status());
+        assertEquals(1, llm.calls);
+        assertEquals("succeeded", service.snapshot(r.runId()).orElseThrow().status());
+        assertFalse(r.steps().isEmpty());
+    }
+
+    @Test
+    @DisplayName("流式：拒答也要推到最后一行，不能让界面停在「材料校验」之前")
+    void rejectedPushesGuardStep() {
+        seed(2);  // min-hits = 5
+
+        List<Step> pushed = new ArrayList<>();
+        service.ask("hot-today", null, false, "admin", null, pushed::add);
+
+        Step last = pushed.get(pushed.size() - 1);
+        assertEquals("guard", last.k());
+        assertEquals("不足", last.value());
+        assertTrue(last.hint().contains("至少需要 5 条"), last.hint());
+    }
+
+    /** 按 k 归并：同 k 取最后一次（和 {@link Proc#replace} 与前端渲染同一套语义）。 */
+    private static List<Step> lastByKey(List<Step> pushed) {
+        java.util.Map<String, Step> m = new java.util.LinkedHashMap<>();
+        for (Step s : pushed) {
+            m.put(s.k(), s);
+        }
+        return new ArrayList<>(m.values());
+    }
+
+    @Test
+    @DisplayName("缓存命中时过程读的是上次那份，不是这次重新算的")
+    void cachedRunCarriesOriginalSteps() {
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+
+        AgentService.Result first = service.ask("hot-today", null, "admin", null);
+        AgentService.Result second = service.ask("hot-today", null, "admin", null);
+
+        assertTrue(second.cached(), "第二次应命中缓存");
+        assertEquals(first.steps(), second.steps());
+    }
+
+    @Test
+    @DisplayName("关键词大小写与多余空格不产生新的缓存键：同一个词只花一次钱")
+    void keywordKeyIgnoresCaseAndSpaces() {
+        assertEquals("ai", AgentService.normalizeKeyword("  AI  "));
+        assertEquals("a b", AgentService.normalizeKeyword(" a   b "));
+
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+
+        AgentService.Result first = service.ask("hot-today", "回购", "admin", null);
+        AgentService.Result second = service.ask("hot-today", "  回购 ", "admin", null);
+
+        assertEquals(1, llm.calls, "同内容不同写法不该再调一次模型");
+        assertTrue(second.cached(), "第二次应命中缓存");
+        assertEquals(first.runId(), second.runId());
+    }
+
+    @Test
+    @DisplayName("强制重算越过同水位线缓存：真的再调一次模型，并且这一版带过程")
+    void forceBypassesCache() {
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+
+        AgentService.Result first = service.ask("hot-today", null, "admin", null);
+        AgentService.Result plain = service.ask("hot-today", null, "admin", null);
+        assertEquals(1, llm.calls, "数据没变时不该再调模型");
+        assertTrue(plain.cached());
+
+        // 过程字段上线前生成的旧结论没有 steps，前端会放开「重新生成」按钮，
+        // 那一下必须真的走到模型；否则用户点了没反应，只能靠换关键词绕。
+        AgentService.Result forced = service.ask("hot-today", null, true, "admin", null);
+
+        assertEquals(2, llm.calls, "force 必须真的再跑一次，不能复用空闲缓存");
+        assertFalse(forced.cached());
+        assertNotEquals(first.runId(), forced.runId(), "要是一条新记录，不是把旧的读回来");
+        assertEquals(Strategy.NOTE_FORCED, forced.note());
+        assertFalse(forced.steps().isEmpty(), "重算出来的这一版必须带过程");
     }
 
     @Test

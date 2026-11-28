@@ -72,6 +72,14 @@ public final class Strategy {
      */
     public static final String NOTE_SAME = "数据没有变化，直接返回上一版";
 
+    /**
+     * 用户明确点了「重新生成」。
+     *
+     * <p>不写「已更新」：这一版和上一版的数据可能完全一样，说"更新"会让人以为
+     * 抓到了新内容。说的是"按你要求的又跑了一遍"，这是唯一确定的事实。
+     */
+    public static final String NOTE_FORCED = "已按你的要求重新生成";
+
     /** 走哪一档。 */
     public enum Mode {
         /** 不调模型，直接把已有结论返回。 */

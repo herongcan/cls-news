@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onAppHide, onAppShow, onPullDownRefresh, onReachBottom } from '@dcloudio/uni-app'
 import NewsItem from '@/components/NewsItem.vue'
 import AgentSheet from '@/components/AgentSheet.vue'
@@ -23,6 +23,7 @@ const {
   reload,
   loadMore,
   search,
+  reveal,
   analyze,
   isAnalyzing,
   start: startPolling,
@@ -266,27 +267,73 @@ function onMoreTap(): void {
   if (state.value === 'idle') void loadMore()
 }
 
+/** 量不到顶栏高度时的兜底：按 390px 屏的实测值给 */
+const TOP_MIN = 84
+
+/** 两条矩形，只取用得到的字段 */
+type Rect = { top: number; height: number; bottom: number }
+
 /**
- * 从主线浮层点某条引用：滚到那一条并高亮。
+ * 把某一条滚到视口中间。
+ *
+ * <p>原来传的是固定 `offsetTop: 96` —— 那是「离顶 96px」，不是居中；而且顶栏高度
+ * 会随「提示条 / 搜索命中数」出现而变化，96 在窄屏上会把卡片标题压在栏底下。
+ *
+ * <p>现在先量两张矩形再算：卡片高度决定居中位置，顶栏高度决定下限。
+ * 卡片比视口还高时（带分析结论的长卡片）居中会把标题推到栏下面，
+ * 所以取两者较大值 —— 先保证看得见标题，再谈居中。
+ */
+async function scrollToCentered(id: number): Promise<void> {
+  await nextTick()
+  const { box, hd } = await new Promise<{ box?: Rect; hd?: Rect }>((resolve) => {
+    uni
+      .createSelectorQuery()
+      .select('#news-' + id)
+      .boundingClientRect()
+      .select('.hd')
+      .boundingClientRect()
+      .exec((res) => {
+        const arr = (res || []) as Array<Rect | null>
+        resolve({ box: arr[0] || undefined, hd: arr[1] || undefined })
+      })
+  })
+  const winH = uni.getSystemInfoSync().windowHeight || 0
+  // 量不到就退回贴顶：首次渲染没完成时 boundingClientRect 会给 null，
+  // 这时候硬算居中会滚到一个凭空的数上，比贴着顶栏差
+  if (!box || !box.height || !winH) {
+    uni.pageScrollTo({ selector: '#news-' + id, offsetTop: TOP_MIN, duration: 240 })
+    return
+  }
+  const cover = hd && hd.height ? Math.round(hd.height) + 8 : TOP_MIN
+  const centered = Math.round((winH - box.height) / 2)
+  uni.pageScrollTo({
+    selector: '#news-' + id,
+    offsetTop: Math.max(cover, centered),
+    duration: 240
+  })
+}
+
+/**
+ * 从主线浮层点某条引用：滚到那一条、居中、高亮。
  *
  * <p>引用是 id，不是下标 —— 列表 30 秒会自动插新条目，用下标存位置一定会错位。
  *
- * <p>不在当前页时不假装找得到：列表只加载了最近几十条，一条 8 小时前的新闻
- * 根本不在 DOM 里，滚不过去。这时给出准确的话（去搜标题），比滚到错误的位置强。
+ * <p>原来「不在当前列表就只给一句提示」。但列表首屏只加载 10 条，引用指向
+ * 几小时前的新闻时几乎必然不在 DOM 里 —— 用户点了引用什么都没发生，
+ * 只能自己去搜标题。现在按 id 单独取回那一条补进列表再滚（`reveal`），
+ * 只有原文真的不存在（404）才提示。
  */
-function jumpToNews(id: number): void {
+async function jumpToNews(id: number): Promise<void> {
   sheetOpen.value = false
-  if (!items.value.some((x) => x.id === id)) {
-    notice.value = '第 ' + id + ' 条不在当前列表，可在上方搜索标题找到它'
+  const where = await reveal(id)
+  if (where === 'missing') {
+    notice.value = '这条引用打不开了，原文可能已被删除'
     return
   }
   highlightId.value = id
   if (highlightTimer) clearTimeout(highlightTimer)
   highlightTimer = setTimeout(() => (highlightId.value = 0), 2600)
-
-  // 用 selector 而不是自己算 rect：页面的滚动容器在 H5 与小程序上不是同一个东西，
-  // 手算 top 的方式换端就错。offsetTop 留出 96px 给吸顶栏，否则标题会被盖住。
-  uni.pageScrollTo({ selector: '#news-' + id, offsetTop: 96, duration: 240 })
+  await scrollToCentered(id)
 }
 
 function dismissNotice(): void {

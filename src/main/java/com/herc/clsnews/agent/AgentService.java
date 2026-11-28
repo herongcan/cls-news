@@ -1,5 +1,6 @@
 package com.herc.clsnews.agent;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.herc.clsnews.config.AppProps;
@@ -126,6 +127,31 @@ public class AgentService {
      * @param actorCap   该角色的独立日额度，null = 只受全站上限约束（由接口层按角色传入）
      */
     public Result ask(String templateId, String keywords, String actor, Integer actorCap) {
+        return ask(templateId, keywords, false, actor, actorCap, Proc.NOOP);
+    }
+
+    /**
+     * @param force 越过「同水位线缓存」与「新增不足」两处短路，按当前数据重新生成一次。
+     *              <p>只给一个场景用：屏上那版结论没有过程数据（过程字段上线前生成的），
+     *              而缓存判定会让每次点击都返回同一版，用户就永远看不到过程。
+     *              这不是"重试"—— 重试应该免费；这是明确的"再跑一次"，所以要付费、要提示价格。
+     */
+    public Result ask(String templateId, String keywords, boolean force, String actor, Integer actorCap) {
+        return ask(templateId, keywords, force, actor, actorCap, Proc.NOOP);
+    }
+
+    /**
+     * 带过程推送的版本。SSE 接口走这个，{@code /api/agent/ask} 走上面那个（sink = NOOP）。
+     *
+     * <p><b>除了多一个 sink，行为完全一致</b>：判定的顺序、缓存的口径、失败时记多少 token，
+     * 全部走同一段代码。这不是洁癖 —— 若流式版本另写一条"边算边报"的路径，两条路的
+     * 判定迟早分叉，界面上出现"流式说走增量、实际按全量扣钱"这种对不上的账。
+     *
+     * @param sink 每完成一步就被调一次。<b>它抛异常不会中断生成</b>，理由见 {@link Proc}
+     */
+    public Result ask(String templateId, String keywords, boolean force, String actor, Integer actorCap,
+                      Proc.Sink sink) {
+        Proc proc = new Proc(sink);
         AppProps.Agent cfg = props.getAgent();
         AgentTemplate t = available(templateId, cfg);
         if (!llm.ready()) {
@@ -133,19 +159,27 @@ public class AgentService {
         }
 
         Prepared in = scan(t, keywords);
+        // 取数这四行在 scan 返回时就已经是真的了（本地查询，几十毫秒）。
+        // 之前它们要等到生成结束才随结果一起出现在界面上，等于把"已经知道的事"压了十几秒 ——
+        // 流式最直接的收益就是把这一段提前，而不是等模型那一步。
+        proc.addAll(Steps.fromScan(in.pack()));
         checkQuota(cfg, in.dayStart(), actor, actorCap);
 
         // §10.2 第一步：跨策略比对。full 与 delta 的输出形态相同，都算缓存候选。
         // 反过来（先找"最近一次 full"再比 watermark）会漏：delta 推进了水位线之后，
         // 数据没变用户再点，水位数与 full 不等，会被判成"要再跑一次 delta"——又扣一次费。
-        Optional<AgentRunStore.RunRow> hit = findHit(t, in);
-        if (hit.isPresent()) {
-            log.info("主线命中同水位线结果 template={} watermark={} run={}",
-                    t.id(), in.watermark(), hit.get().id());
-            // note 不能给 null：这是"用户又点了一次、结果没变"最常见的路径，
-            // 而浮层正是靠这句话回答"为什么这次没重算"。null 的话界面上什么都不说，
-            // 用户只会以为按钮坏了（S1.4 原型确认过这个场景）。
-            return toResult(hit.get(), true, Strategy.NOTE_SAME);
+        if (force) {
+            log.info("主线强制重算 template={} watermark={}（跳过同水位线缓存）", t.id(), in.watermark());
+        } else {
+            Optional<AgentRunStore.RunRow> hit = findHit(t, in);
+            if (hit.isPresent()) {
+                log.info("主线命中同水位线结果 template={} watermark={} run={}",
+                        t.id(), in.watermark(), hit.get().id());
+                // note 不能给 null：这是"用户又点了一次、结果没变"最常见的路径，
+                // 而浮层正是靠这句话回答"为什么这次没重算"。null 的话界面上什么都不说，
+                // 用户只会以为按钮坏了（S1.4 原型确认过这个场景）。
+                return toResult(hit.get(), true, Strategy.NOTE_SAME);
+            }
         }
 
         PackResult pack = in.pack();
@@ -158,15 +192,32 @@ public class AgentService {
             runs.insertRejected(runId, t.id(), in.params(), actorOr(actor), in.windowKey(), "full",
                     in.watermark(), verdict.reason() + "：" + verdict.detail(), pack.candidates());
             runs.insertStep(runId, 1, "guard", 0, null, 0, 0, 0, verdict.detail());
+            // 拒答也要留过程：「材料校验 不足」这一行正是用户要的答案，
+            // 只给一句 detail 的话，他看不出是在 69 条里判不足，还是压根没取到数据。
+            // 取数那几行 scan 之后就进了 proc（也推给了界面），这里只补最后一行
+            List<Step> steps = proc.add(Steps.guard(verdict)).list();
+            runs.stampSteps(runId, json(steps));
             log.info("主线拒答 template={} reason={} candidates={} （0 token）",
                     t.id(), verdict.reason(), pack.candidates());
             return new Result(runId, t.id(), "rejected", "full", t.title(), null,
                     verdict.reason(), verdict.detail(), null, in.watermark(), pack.candidates(),
-                    0, 0, now(), false, llm.modelName());
+                    0, 0, now(), false, llm.modelName(), steps);
         }
 
         // §10.2 第二步：三档判定。纯函数，不花钱，但决定了下面要不要花、花多少。
-        GenCtx ctx = prepare(t, pack, in.params(), in.windowKey(), in.watermark(), in.from(), in.to());
+        GenCtx ctx;
+        if (force) {
+            // 强制重算：旧记录先让位（唯一索引覆盖 succeeded），再按全量跑一次。
+            // 不让位的话，claim 会读到那条 succeeded 并直接返回它 —— 用户点了「重新生成」，
+            // 拿回来的还是同一版，一个字都没变，而且不会报任何错。
+            int freed = runs.supersede(t.id(), in.windowKey(), in.watermark(), in.params());
+            ctx = new GenCtx(Strategy.Mode.FULL, Strategy.NOTE_FORCED,
+                    null, null, 0, null, 0, 0, 0, null);
+            log.info("主线强制重算 template={} watermark={}（让位 {} 条旧记录，按全量重跑）",
+                    t.id(), in.watermark(), freed);
+        } else {
+            ctx = prepare(t, pack, in.params(), in.windowKey(), in.watermark(), in.from(), in.to());
+        }
         if (ctx.mode() == Strategy.Mode.CACHE) {
             log.info("主线按新增不足返回上一版 template={} watermark={} base={} {}",
                     t.id(), in.watermark(), ctx.baseRow().id(), ctx.note());
@@ -184,7 +235,7 @@ public class AgentService {
                 // 比模型超时多 5 秒：等待上限必须比被等的事情长，否则必然先超时
                 cfg.getTimeoutMs() + 5_000L,
                 () -> generate(t, pack, in.params(), in.windowKey(), actor, in.watermark(),
-                        in.from(), in.to(), ctx));
+                        in.from(), in.to(), ctx, proc));
 
         if (waited.follower()) {
             // 这次没有调模型，结果是别人的。对用户按"缓存命中"呈现，
@@ -229,14 +280,17 @@ public class AgentService {
         if (cached != null) {
             return new Precheck(t.id(), t.title(), t.cacheable(), t.window(), "cached", "cache", ready,
                     0, cached.candidates(), 0, full, in.watermark(), cached.createdAt(),
-                    cached.id(), null, left, Strategy.NOTE_SAME, null);
+                    cached.id(), null, left, Strategy.NOTE_SAME, null, readSteps(cached));
         }
 
         Guard.Verdict verdict = Guard.check(t, in.pack());
         if (verdict.rejected()) {
+            // 拒答没有结论可对应，过程就是「这次为什么判不足」
+            List<Step> steps = Steps.fromScan(in.pack());
+            steps.add(Steps.guard(verdict));
             return new Precheck(t.id(), t.title(), t.cacheable(), t.window(), "rejected",
                     verdict.reason(), ready, 0, in.pack().candidates(), 0, full, in.watermark(),
-                    0, null, null, left, null, verdict.detail());
+                    0, null, null, left, null, verdict.detail(), steps);
         }
 
         GenCtx ctx = prepare(t, in.pack(), in.params(), in.windowKey(), in.watermark(),
@@ -245,7 +299,7 @@ public class AgentService {
             AgentRunStore.RunRow row = ctx.baseRow();
             return new Precheck(t.id(), t.title(), t.cacheable(), t.window(), "cached", "too-few", ready,
                     0, row.candidates(), 0, full, in.watermark(), row.createdAt(),
-                    row.id(), null, left, ctx.note(), null);
+                    row.id(), null, left, ctx.note(), null, readSteps(row));
         }
 
         // prepare 只在 DELTA 时把 base 带回来（FULL 时故意为 null，避免误用）。
@@ -261,11 +315,32 @@ public class AgentService {
                 ctx.mode() == Strategy.Mode.DELTA ? "delta" : "full", ctx.note(), ready,
                 ctx.added(), in.pack().candidates(), estimate, full, in.watermark(),
                 base == null ? 0 : base.createdAt(), null, base == null ? null : base.id(),
-                left, ctx.note(), null);
+                left, ctx.note(), null, base == null ? List.of() : readSteps(base));
+    }
+
+    /**
+     * 开流前的「能不能开始」判定：开关 / 模板 / key / 配额，四道门。
+     *
+     * <p><b>为什么 SSE 需要它而同步接口不需要</b>：同步接口抛异常时状态码还没发出去，
+     * 直接变成 503 / 429。而 SSE 一旦把 emitter 交给 Spring，响应头就已经是 200 了 ——
+     * 之后再想报"没额度"，只能塞进事件里，前端和监控看到的永远是 200，
+     * 分不清"接口坏了"和"今天用完了"。
+     *
+     * <p>不取数、不落库、0 token，毫秒级。真正取数要等到开流之后 —— 那时才有地方推步骤。
+     *
+     * <p>和 {@link #ask} 头部的四项检查是同一段逻辑，故意重复：这里少判一项，
+     * 用户就会看到流建立成功、然后第一个事件是错误。
+     */
+    public void preflight(String templateId, String actor, Integer actorCap) {
+        AppProps.Agent cfg = props.getAgent();
+        available(templateId, cfg);
+        if (!llm.ready()) {
+            throw new AgentException(503, "NOT_READY", "模型未就绪，检查 API key 是否配置");
+        }
+        checkQuota(cfg, LocalDate.now(ZONE).atStartOfDay(ZONE).toEpochSecond(), actor, actorCap);
     }
 
     // ---------------------------------------------------------------- 体检
-
     /**
      * 主线功能的自检。<b>只读、0 token、不写库</b>，可以随便打。
      *
@@ -385,7 +460,18 @@ public class AgentService {
             String baseRunId,
             int remaining,
             String note,
-            String detail) {
+            String detail,
+            /**
+             * 屏上那份结论是怎么来的。
+             *
+             * <p><b>必须是「已有结论的过程」，不是「这次将要做什么」的预览</b>：
+             * full/delta 时浮层显示的是 baseRunId 那一版，若把本次 scan 的计数摆在它下面，
+             * 用户会把「打包 48 条」读成那段结论的输入，而那段结论其实来自 69 条。
+             * 本次的预期消耗已经由 {@code estimateTokens} 表达，不需要再借过程区说一遍。
+             *
+             * <p>没有可展示的结论时（今天第一次生成）为空列表，前端不渲染这一块。
+             */
+            List<Step> steps) {
     }
 
     // ---------------------------------------------------------------- 前置步骤
@@ -421,7 +507,8 @@ public class AgentService {
         long to = today.plusDays(1).atStartOfDay(ZONE).toEpochSecond();
         long from = dayStart - (t.windowSeconds() - DAY);
         String windowKey = today.toString();
-        String params = paramsJson(t, keywords);
+        // 检索用原样（大小写可能有意义），但缓存键只认内容：见 normalizeKeyword 的注释
+        String params = paramsJson(t, normalizeKeyword(keywords));
 
         // 模板自带的同义词 + 调用方追加的关键词，OR 关系。
         // 这一步曾经漏过：t.keywords() 解析出来了却没人用，a-share-drop 实际喂给模型的是
@@ -578,10 +665,19 @@ public class AgentService {
      * （取数、分类合并、打包、缓存比对、拒答判定）不该被第二个请求重跑一遍。
      */
     private Result generate(AgentTemplate t, PackResult pack, String params, String windowKey,
-                            String actor, long watermark, long from, long to, GenCtx ctx) {
+                            String actor, long watermark, long from, long to, GenCtx ctx,
+                            Proc proc) {
         String runId = newRunId();
         boolean delta = ctx.mode() == Strategy.Mode.DELTA;
         String strategy = delta ? "delta" : "full";
+
+        // 过程从「取数」开始（scan 之后就已经进 proc 了），走到哪一步就在哪一步补一行。
+        // 为什么在入口就建好而不是各分支各拼一份：失败路径也要留下已经走过的步骤 ——
+        // 「卡在解析」和「卡在模型超时」在界面上都只是一句 502，靠这几行才分得开。
+        proc.add(Step.of("guard", "材料校验", "通过"));
+        if (delta) {
+            proc.add(Step.of("delta", "增量基线", "新增 " + ctx.added() + " 条"));
+        }
 
         // 方案 A：在数据库抢一次生成权。这一步是"还没花钱就能拦住"的唯一位置。
         // strategy 与 base_run_id 不参与唯一索引（见 AgentRunStore.claim 的注释），
@@ -616,6 +712,11 @@ public class AgentService {
             user = PromptBuilder.render(t, pack, from, to);
         }
 
+        // 先占一行「等待中」再发请求。这一行是流式体验的关键：前面五步加起来不到 100ms，
+        // 接下来这十几秒里如果界面上什么都不动，用户会以为卡死了 —— 而它确实在等，
+        // 只是等的过程中没有任何可报的数字（token 要回来才知道）。
+        proc.add(Steps.llmWaiting());
+
         AgentLlm.Reply reply;
         long started = System.currentTimeMillis();
         try {
@@ -625,17 +726,25 @@ public class AgentService {
             // 钱已经花出去了，记 0 会让账单和库里的账永远对不上
             long ms = System.currentTimeMillis() - started;
             runs.markFailed(runId, e.getMessage(), e.tokensIn(), e.tokensOut(), ms);
+            proc.replace(Steps.llmFailed(ms, "已消耗 " + (e.tokensIn() + e.tokensOut()) + " token"));
+            runs.stampSteps(runId, json(proc.list()));
             log.warn("主线生成失败（已消耗 {} token）run={} template={}：{}",
                     e.tokensIn() + e.tokensOut(), runId, t.id(), e.getMessage());
-            throw new AgentException(502, "MODEL_ERROR", e.getMessage());
+            throw new AgentException(502, "MODEL_ERROR", userModelError(e.getMessage()));
         } catch (Exception e) {
             long ms = System.currentTimeMillis() - started;
-            // 拿不到 usage 的失败（超时、401、网络）：记 0，不编造
-            runs.markFailed(runId, String.valueOf(e.getMessage()), 0, 0, ms);
-            log.warn("主线生成失败 run={} template={}：{}", runId, t.id(), e.getMessage());
-            throw new AgentException(502, "MODEL_ERROR", String.valueOf(e.getMessage()));
+            // 拿不到 usage 的失败（超时、401、网络）：记 0，不编造。
+            // 这里有两句话要分开：给用户的是短人话（详情只会让人来问"坏了？"），
+            // 给运维的是原始原因 —— 它进日志，不进浮层。
+            String detail = String.valueOf(e.getMessage());
+            runs.markFailed(runId, detail, 0, 0, ms);
+            proc.replace(Steps.llmFailed(ms, userModelError(detail)));
+            runs.stampSteps(runId, json(proc.list()));
+            log.warn("主线生成失败 run={} template={}：{}", runId, t.id(), detail);
+            throw new AgentException(502, "MODEL_ERROR", userModelError(detail));
         }
 
+        proc.replace(Steps.llm(reply.latencyMs(), reply.tokensIn()));
         runs.insertStep(runId, 2, "llm", user.length(), reply.content(),
                 reply.tokensIn(), reply.tokensOut(), reply.latencyMs(), null);
 
@@ -645,18 +754,22 @@ public class AgentService {
         } catch (Exception e) {
             runs.markFailed(runId, "输出解析失败：" + e.getMessage(),
                     reply.tokensIn(), reply.tokensOut(), reply.latencyMs());
+            runs.stampSteps(runId, json(proc.list()));
             throw new AgentException(502, "BAD_OUTPUT", e.getMessage());
         }
+
+        proc.add(Steps.cite(parsed));
 
         if (parsed.empty()) {
             // 钱已经花了，但结果是废的。判 rejected 而不是 succeeded：
             // 否则下一次点同一水位线会命中这条"没有结论的成功记录"，永远拿不到结果。
             String detail = "模型给不出有引用支撑的结论（" + parsed.note() + "），已丢弃。可稍后重试。";
+            runs.stampSteps(runId, json(proc.list()));
             runs.markRejected(runId, "empty-answer：" + detail, pack.candidates());
             log.warn("主线全部结论无有效引用 run={} {}", runId, parsed.note());
             return new Result(runId, t.id(), "rejected", strategy, t.title(), null,
                     "empty-answer", detail, null, watermark, pack.candidates(),
-                    reply.tokensIn(), reply.tokensOut(), now(), false, reply.model());
+                    reply.tokensIn(), reply.tokensOut(), now(), false, reply.model(), proc.list());
         }
 
         // 增量的特有护栏：输出条数不到上一版的一半，且新增本来就不多，
@@ -682,6 +795,7 @@ public class AgentService {
                           + " 条，新增 " + ctx.added() + " 条），疑似模型过度删减，已回退到上一版。";
                 // 用 failed 而不是 rejected：token 已经花了，必须如实记账；
                 // 而 rejected 会把 tokens 强制写成 0，账就和账单对不上了。
+                runs.stampSteps(runId, json(proc.list()));
                 runs.markFailed(runId, "suspect-delta：" + detail,
                         reply.tokensIn(), reply.tokensOut(), reply.latencyMs());
                 log.warn("主线增量疑似过度删减，回退上一版 run={} base={} bullets={} added={}",
@@ -693,6 +807,9 @@ public class AgentService {
             }
         }
 
+        // 先记过程再定终态：过程是「做过什么」这个事实，状态是「成了没有」这个结论。
+        // 反过来的话，markSucceeded 与 stampSteps 之间被杀，会留下一条「成功但没有过程」的行
+        runs.stampSteps(runId, json(proc.list()));
         boolean stored = runs.markSucceeded(runId, json(parsed.answer()), json(parsed.refs()),
                 pack.candidates(), reply.tokensIn(), reply.tokensOut(), reply.model(), reply.latencyMs());
         if (!stored) {
@@ -714,7 +831,34 @@ public class AgentService {
                 reply.latencyMs(), parsed.note());
         return new Result(runId, t.id(), "succeeded", strategy, parsed.answer().title(),
                 parsed.answer(), null, null, ctx.note(), watermark, pack.candidates(),
-                reply.tokensIn(), reply.tokensOut(), now(), false, reply.model());
+                reply.tokensIn(), reply.tokensOut(), now(), false, reply.model(), proc.list());
+    }
+
+    /**
+     * 把模型失败翻译成给用户看的一句话。
+     *
+     * <p>这里有两类读者，必须分开：浮层里的读者是同事，看到「API key 无效（401）：
+     * 检查 app.agent.api-key / DEEPSEEK_API_KEY / ~/.codex/auth.json」只会来问一句"坏了？"，
+     * 然后你才发现是 key 的问题 —— 这一来一回什么也没解决。所以给用户的只有人话，
+     * 原始原因留在 {@code log.warn} 里，运维去日志里翻。
+     *
+     * <p>约束和 {@code AnalysisCopyTest} 一致：用户可见文案 ≤14 字、不含配置项名。
+     * 只是这里不单独写成一个测试类，因为错误分类是字符串匹配，逐条断言收益低、
+     * 反而把「哪种措辞算人话」这个真问题淹没在表驱动里。
+     */
+    private static String userModelError(String detail) {
+        if (detail == null || detail.isBlank()) {
+            return "模型调用失败，稍后再试";
+        }
+        if (detail.contains("超时") || detail.contains("timed out") || detail.contains("Timeout")) {
+            return "模型响应超时，稍后再试";
+        }
+        if (detail.contains("401") || detail.contains("无效") || detail.contains("key")) {
+            // 认证类问题也归类到「服务异常」：用户知道了是 key 错也无能为力，
+            // 反而会追问「那 key 是什么」。这类细节只该出现在日志里。
+            return "模型服务异常，稍后再试";
+        }
+        return "模型调用失败，稍后再试";
     }
 
     /**
@@ -751,7 +895,7 @@ public class AgentService {
         }
         return new Result(r.runId(), r.templateId(), r.status(), r.strategy(), r.title(), r.answer(),
                 r.reason(), r.detail(), r.note(), r.watermark(), r.candidates(), r.tokensIn(),
-                r.tokensOut(), r.generatedAt(), true, r.model());
+                r.tokensOut(), r.generatedAt(), true, r.model(), r.steps());
     }
 
     /** 只读查询，给轮询 / 重连用。S1.4 的接口会用到。 */
@@ -777,7 +921,7 @@ public class AgentService {
             // 否则轮询方只能看到 404，分不清"还在跑"和"这次没成"
             return new Result(row.id(), row.templateId(), row.status(), row.strategy(), null, null,
                     null, null, null, row.watermark(), row.candidates(), row.tokensIn(),
-                    row.tokensOut(), row.createdAt(), true, row.model());
+                    row.tokensOut(), row.createdAt(), true, row.model(), readSteps(row));
         });
     }
 
@@ -816,7 +960,27 @@ public class AgentService {
         return new Result(row.id(), row.templateId(), "succeeded", row.strategy(),
                 answer == null ? null : answer.title(), answer, null, null, note,
                 row.watermark(), row.candidates(), row.tokensIn(), row.tokensOut(),
-                row.createdAt(), cached, row.model());
+                row.createdAt(), cached, row.model(), readSteps(row));
+    }
+
+    /**
+     * 读回「过程」。
+     *
+     * <p>解析失败降级成空列表而不是抛错：过程是解释性数据，它坏了不该让
+     * 「已经付过费的结论」跟着打不开。日志留一条，能查到是哪个 run。
+     */
+    private List<Step> readSteps(AgentRunStore.RunRow row) {
+        String json = row.stepsJson();
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return mapper.readValue(json, new TypeReference<List<Step>>() {
+            });
+        } catch (Exception e) {
+            log.warn("run {} 的 steps_json 无法解析：{}", row.id(), e.getMessage());
+            return List.of();
+        }
     }
 
     /** 库里存的是自己写的 JSON，理论上一定可解析；解析不出来说明代码有 bug，不该 500 掉整个请求。 */
@@ -834,8 +998,22 @@ public class AgentService {
         }
     }
 
-    private String paramsJson(AgentTemplate t, String keywords) {
-        ObjectNode n = mapper.createObjectNode();
+    /**
+     * 关键词归一化，只用于缓存键。
+     *
+     * <p>实测踩到：同一个人先打 {@code ai}、再打 {@code AI}，缓存键不同，于是两次全量各花 842 token
+     * —— 而检索语句对 ASCII 本来就不区分大小写，两次拿到的材料完全一样。键必须只由"内容"决定，
+     * 不能由输入时的大小写与前后的空格决定；否则每次手抖都要用户再付一次钱。
+     *
+     * <p>只归一化键，不改检索用的原值：中文与全角符号的处理留给 SQL 那边，
+     * 在这里多做一层转换，反而可能让"用户打的关键词"和"工具查的关键词"对不上。
+     */
+    static String normalizeKeyword(String keywords) {
+        if (keywords == null) return "";
+        return keywords.trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private String paramsJson(AgentTemplate t, String keywords) {        ObjectNode n = mapper.createObjectNode();
         n.put("templateId", t.id());
         n.put("window", t.window());
         if (keywords != null && !keywords.isBlank()) {
@@ -926,6 +1104,8 @@ public class AgentService {
             int tokensOut,
             long generatedAt,
             boolean cached,
-            String model) {
+            String model,
+            /** 这次生成做了哪些确定性步骤（取数/剔除/打包/校验/模型/引用）。缓存命中时读的是库里那份；老数据为空 */
+            List<Step> steps) {
     }
 }

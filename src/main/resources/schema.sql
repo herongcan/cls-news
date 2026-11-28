@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS agent_run (
     status        TEXT NOT NULL,          -- running | succeeded | failed | rejected
     answer_json   TEXT,                   -- {title, bullets[], insufficient}
     citations_json TEXT,                  -- 校验通过的 id（与工具真实返回求交后的结果）
+    steps_json    TEXT,                   -- 这次生成做了哪些步骤（确定性数字，见 Steps）；老行为 NULL
     candidates    INTEGER,                -- 送进模型的条数
     tokens_in     INTEGER NOT NULL DEFAULT 0,
     tokens_out    INTEGER NOT NULL DEFAULT 0,

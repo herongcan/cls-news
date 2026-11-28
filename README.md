@@ -535,7 +535,7 @@ ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
 
 ### 运行一次会看到什么
 
-1. `./mvnw -B package`（含 47 个单元测试；首次约 2 分钟，有 Maven 缓存后 40 秒左右）
+1. `./mvnw -B package`（含 210 个单元测试；首次约 2 分钟，有 Maven 缓存后 40 秒左右）
 2. 校验 `target/cls-news-0.1.0.jar` 是 Spring Boot fat jar（否则服务器上会报
    `no main manifest attribute`，得翻半天日志）
 3. `ssh-keyscan` 写 `known_hosts`（不用 `StrictHostKeyChecking=no`，那个等于关掉中间人防护）

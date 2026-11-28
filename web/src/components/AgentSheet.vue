@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { agentAsk, agentPrecheck, agentRun, agentTemplates } from '@/api/agent'
-import type { AgentPrecheck, AgentResult, AgentTemplate } from '@/api/agent'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { agentAskStream, agentPrecheck, agentRun, agentTemplates } from '@/api/agent'
+import type { AgentPrecheck, AgentResult, AgentStep, AgentTemplate } from '@/api/agent'
 import { ApiError } from '@/api/http'
 import { stampShort } from '@/utils/format'
 
@@ -46,6 +46,128 @@ const activeTemplate = computed(() => templates.value.find((t) => t.id === activ
 
 const bullets = computed(() => result.value?.bullets ?? [])
 
+/**
+ * 生成中，一行一行推回来的过程。
+ *
+ * <p>和 {@code result.steps} 是同一套数据、不同时刻：这里是在跑的，那里是跑完落库的。
+ * 分开存而不是直接往 result 里塞，是因为生成中 result 还是上一版结论 ——
+ * 把这一版的步骤写进上一版的结果里，界面会显示"上一版结论 + 这一版的取数条数"。
+ */
+const liveSteps = ref<AgentStep[]>([])
+
+/** 已经等了多少秒。用于模型那一步的心跳，前端自己数，不靠服务端推 */
+const waited = ref(0)
+let ticker: ReturnType<typeof setInterval> | null = null
+/** 当前这条流的开关。关浮层、换模板都要拉，不然会挂到服务端超时 */
+let stopStream: (() => void) | null = null
+/**
+ * 这次断开是我们自己拉的，不是服务端给的终态。
+ *
+ * <p>用来区分"生成完了要补一次报价"和"用户把浮层关了、什么都不用做"。
+ * 没有它的话，每次关浮层都会多发一个 precheck —— 虽然免费，但纯属噪音。
+ */
+let manualStop = false
+
+/**
+ * 「过程」折叠区。
+ *
+ * <p>默认收起：它不是结论的一部分，展开后一次 7 行，会把 5 条主线挤到屏幕外。
+ * 但它是唯一能回答「为什么这次只有 3 条」的地方，所以要有一个明显的入口。
+ *
+ * <p>拒答时也读：过程停在「材料校验 不足」，hint 就是拒答原因 ——
+ * 那时 result 是 null，只看 result 会让最需要解释的场景恰好没有解释。
+ *
+ * <p>生成中优先用 liveSteps：此时 result 还是上一版，读它会把旧的过程摆在
+ * 正在跑的新一次下面，数字全对不上。
+ */
+const steps = computed<AgentStep[]>(() => {
+  if (liveSteps.value.length) return liveSteps.value
+  return result.value?.steps ?? rejected.value?.steps ?? []
+})
+const showSteps = ref(false)
+
+/**
+ * 往 liveSteps 里放一行：同 k 覆盖，否则追加。
+ *
+ * <p>覆盖而不是追加，是因为模型那步会推两次（「等待中」→「9.9 秒」）。
+ * 追加的话界面上会出现两行"调用模型"，用户不知道该信哪个。
+ */
+function pushStep(s: AgentStep): void {
+  const at = liveSteps.value.findIndex((x) => x.k === s.k)
+  if (at >= 0) liveSteps.value.splice(at, 1, s)
+  else liveSteps.value.push(s)
+}
+
+/**
+ * 模型那一步的 hint 换成实时秒数。
+ *
+ * <p>服务端在这一步只会推一行「等待中」，之后十几秒一个字都没有 —— 那是模型在算，
+ * 它确实没有可报的数字。但"什么都没变"和"卡死了"在屏幕上长得一样，
+ * 所以这一行自己走秒表。走的是本地时钟，比让服务端每秒推一次更准也更省。
+ */
+function stepHint(s: AgentStep): string | undefined {
+  if (s.k === 'llm' && s.value === '等待中') {
+    return waited.value > 0 ? '已等 ' + waited.value + ' 秒' : '已发出请求'
+  }
+  return s.hint || undefined
+}
+
+function clearTicker(): void {
+  if (ticker) {
+    clearInterval(ticker)
+    ticker = null
+  }
+}
+
+/** 断流。三处要调：关浮层、换模板、组件卸载 */
+function stop(): void {
+  manualStop = true
+  clearTicker()
+  if (stopStream) {
+    stopStream()
+    stopStream = null
+  }
+}
+
+/* 组件被销毁时也要断：否则这条连接会挂到服务端超时（那是两分钟） */
+onUnmounted(stop)
+
+/**
+ * 第一次拿到过程时自动展开。
+ *
+ * <p>折叠区默认收起是对的（一块 7 行会挤掉结论），但"默认收起"和"根本不存在"
+ * 在屏幕上长得一样 —— 反馈里两次都是"没看到过程"。所以先展开一次让人知道它在这儿，
+ * 之后完全交给用户：看过就不再自动展开。
+ */
+const STEPS_SEEN = 'agent-steps-seen'
+watch(
+  () => steps.value.length,
+  (n) => {
+    if (!n) return
+    // 生成中必须展开。这一步的全部意义就是让人看到它在动，
+    // 这时候收起来等于什么都没做 —— 而"有过程但没展开"和"根本没过程"长得一样
+    if (busy.value === 'run') {
+      showSteps.value = true
+      return
+    }
+    try {
+      if (localStorage.getItem(STEPS_SEEN)) return
+      localStorage.setItem(STEPS_SEEN, '1')
+    } catch {
+      /* 隐私模式/小程序没有 localStorage：那就每次展开，不影响功能 */
+    }
+    showSteps.value = true
+  }
+)
+
+/**
+ * 有结论、但这一版没留下过程。
+ *
+ * <p>过程是后加的字段，升级前生成的 run 全是空的。空着不解释，用户只会得出
+ * 「这个功能没做」—— 而真相是「你看到的那一版太旧」。所以宁可多一行灰字。
+ */
+const noSteps = computed(() => bullets.value.length > 0 && steps.value.length === 0)
+
 const heading = computed(
   () => result.value?.title || activeTemplate.value?.title || '今日主线'
 )
@@ -62,7 +184,7 @@ const metaLine = computed(() => {
   const p = pre.value
   if (!p) return ''
   if (p.strategy === 'rejected') return ''
-  if (p.strategy === 'cached') return '已有结论，未消耗 token'
+  if (p.strategy === 'cached') return noSteps.value ? '已有结论 · 这一版没有过程数据' : '已有结论，未消耗 token'
   const cost = k(p.estimateTokens) + ' token'
   if (p.strategy === 'delta' && p.newCount > 0) return '新增 ' + p.newCount + ' 条 · 约 ' + cost
   return '预计 ' + cost
@@ -99,7 +221,10 @@ const canClick = computed(() => {
   const p = pre.value
   if (!p) return false
   if (!p.ready) return false
-  if (p.strategy === 'cached' || p.strategy === 'rejected') return false
+  // cached 正常不给点（再点也不会更便宜）。但「结论有、过程没留下」是唯一例外：
+  // 不给入口的话，用户会一直卡在一版没有过程的旧结论上，只能靠换关键词绕过去。
+  if (p.strategy === 'cached') return noSteps.value
+  if (p.strategy === 'rejected') return false
   return p.remaining > 0
 })
 
@@ -113,7 +238,7 @@ const actionLabel = computed(() => {
   if (!p.ready) return '模型未就绪'
   if (p.remaining <= 0) return '额度用尽'
   if (p.strategy === 'rejected') return '材料不足'
-  if (p.strategy === 'cached') return '已最新'
+  if (p.strategy === 'cached') return noSteps.value ? '重新生成' : '已最新'
   return result.value ? '更新' : '生成'
 })
 
@@ -134,7 +259,11 @@ const quotaHint = computed(() => {
 const priceHint = computed(() => {
   const p = pre.value
   if (!p || !p.ready || !result.value) return ''
-  if (p.strategy === 'cached' || p.strategy === 'rejected') return ''
+  if (p.strategy === 'rejected') return ''
+  // 缺过程时按钮会变成「重新生成」，这一下是真花钱，价格必须挨着按钮说
+  if (p.strategy === 'cached') {
+    return noSteps.value ? '重新生成约 ' + k(p.baselineTokens) + ' token' : ''
+  }
   const save = p.baselineTokens - p.estimateTokens
   return '本次约 ' + k(p.estimateTokens) + ' token'
     + (save > 0 ? '（全量 ' + k(p.baselineTokens) + '）' : '')
@@ -142,6 +271,12 @@ const priceHint = computed(() => {
 
 const emptyHint = computed(() => {
   if (busy.value === 'pre') return '正在读今日电报…'
+  // 生成中不能还说「今天还没有生成过」：那句话说的是「点一下」，而此刻已经在点了。
+  // 有过程行时这里留空 —— 过程区正在逐行报进度，再说一遍只是两处文字抢注意力
+  if (busy.value === 'run') {
+    if (liveSteps.value.length) return ''
+    return waited.value > 0 ? '正在等模型返回…' : '正在取数、打包…'
+  }
   if (err.value) return ''
   const p = pre.value
   if (!p) return ''
@@ -183,6 +318,13 @@ async function boot(): Promise<void> {
 async function refresh(): Promise<void> {
   if (!active.value) return
   busy.value = 'pre'
+  // 换模板 / 换关键词 / 重新打开都会走到这里：过程区必须收起，
+  // 否则上一份结论展开着、新结论还没到，会看到一段对不上的数字。
+  // liveSteps 也要清：那是上一次生成推过来的，留着会挂在新结论下面
+  showSteps.value = false
+  liveSteps.value = []
+  clearTicker()
+  waited.value = 0
   try {
     const p = await agentPrecheck(active.value, applied.value)
     pre.value = p
@@ -203,30 +345,71 @@ async function refresh(): Promise<void> {
   }
 }
 
-async function run(): Promise<void> {
+/**
+ * 点「生成」：开一条流，过程一行一行进来。
+ *
+ * <p><b>为什么不是 async/await</b>：结果不是一个 Promise，而是一串事件。
+ * 等它 resolve 就等于回到了同步请求 —— 那正是这次要改掉的东西。
+ * 收尾统一放在 onClose：正常、失败、中途断线都会走到那一个出口，
+ * 计时器和 stopStream 只需要在一个地方清。
+ */
+function run(): void {
   if (!canClick.value) return
   err.value = ''
+
+  // 点下去就切"生成中"：从点击到第一个事件之间还有建连和取数，
+  // 那一小段界面必须已经变了，否则点完像是没反应
   busy.value = 'run'
+  liveSteps.value = []
+  waited.value = 0
+  manualStop = false
+  clearTicker()
+  ticker = setInterval(() => {
+    waited.value += 1
+  }, 1000)
+
+  // 只有"屏上这版没有过程、而缓存判定不许再点"时才强制重算；其余路径照旧走缓存
+  const force = pre.value?.strategy === 'cached' && noSteps.value
+
+  stopStream = agentAskStream(active.value, applied.value, force, {
+    onStep: pushStep,
+    onDone: (r) => {
+      if (r.status === 'rejected') {
+        result.value = null
+        rejected.value = r
+      } else {
+        result.value = r
+        rejected.value = null
+      }
+      // 结论到了就交还给库里那份：内容与 liveSteps 相同（同一次生成），
+      // 但以 done 为准，才能保证"界面显示的"和"按 runId 查到的"永远一致
+      liveSteps.value = []
+      showSteps.value = true
+    },
+    onError: (e) => {
+      err.value = msg(e)
+      // 失败后过程区留着已经走过的那几行 —— 「卡在调用模型」和「卡在解析」
+      // 都只是一句报错，正是这几行把它们分开
+    },
+    onClose: () => {
+      busy.value = ''
+      clearTicker()
+      stopStream = null
+      // 主动断的（关浮层、换模板）不该再发请求：那个免费的报价是给"生成完"用的
+      if (!manualStop) void refreshQuietly()
+    }
+  })
+}
+
+/**
+ * 生成完再报一次价：这时应判 cached、按钮失去作用 —— 恰好证明"再点一次不会再花钱"。
+ * 失败不影响已经拿到的结论：钱已经花完了，界面不该因为一次免费请求失败而变空。
+ */
+async function refreshQuietly(): Promise<void> {
   try {
-    const r = await agentAsk(active.value, applied.value)
-    if (r.status === 'rejected') {
-      result.value = null
-      rejected.value = r
-    } else {
-      result.value = r
-      rejected.value = null
-    }
-    // 生成完再报一次价：这时应判 cached、按钮失去作用 —— 恰好证明"再点一次不会再花钱"。
-    // 报价失败不影响已经拿到的结论：钱已经花完了，界面不该因为一次免费请求失败而变空
-    try {
-      pre.value = await agentPrecheck(active.value, applied.value)
-    } catch {
-      /* 忽略 */
-    }
-  } catch (e) {
-    err.value = msg(e)
-  } finally {
-    busy.value = ''
+    pre.value = await agentPrecheck(active.value, applied.value)
+  } catch {
+    /* 忽略 */
   }
 }
 
@@ -270,7 +453,13 @@ async function applyKeyword(): Promise<void> {
 watch(
   () => props.open,
   (v) => {
-    if (v) void boot()
+    if (v) {
+      void boot()
+    } else {
+      // 关掉浮层就把流断掉。注意服务端不会因此停下 —— 模型已经发出去了，钱照花、
+      // 结论照落库，下次打开按 runId 还能读回来。这里只是不再听
+      stop()
+    }
     // 桌面端：Esc 关闭。手机上用的是点遮罩
     // #ifdef H5
     if (v) window.addEventListener('keydown', onKey)
@@ -330,6 +519,34 @@ function onKey(e: KeyboardEvent): void {
             </view>
           </view>
         </view>
+
+        <!-- 过程：默认收起。结论是给人看的，过程是给「结论怎么来的」这个疑问看的 -->
+        <view v-if="steps.length" class="proc">
+          <view class="proc-hd" @tap="showSteps = !showSteps">
+            <text class="proc-ar" :class="{ open: showSteps }">›</text>
+            <text class="proc-t">生成过程</text>
+            <!-- 生成中不说"5 步"：那个数字还在涨，报一个中途的数只会让人以为就这么多 -->
+            <text class="proc-n">{{ busy === 'run' ? '进行中' : steps.length + ' 步' }}</text>
+          </view>
+          <view v-if="showSteps" class="proc-list">
+            <!-- key 用 k 不用下标：覆盖同一步（等待中 → 9.9 秒）时复用的是同一个节点，
+                 用下标会让下一行错位重渲染，看起来像整块在闪 -->
+            <view
+              v-for="s in steps"
+              :key="s.k"
+              class="proc-row"
+              :class="{ live: busy === 'run' && s === steps[steps.length - 1] }"
+            >
+              <text class="proc-l">{{ s.label }}</text>
+              <text class="proc-v">{{ s.value }}</text>
+              <text v-if="stepHint(s)" class="proc-h">{{ stepHint(s) }}</text>
+            </view>
+          </view>
+        </view>
+        <!-- 没过程要说明：静默不显示会被读成「这个功能没做」 -->
+        <text v-else-if="noSteps" class="proc-gap">
+          这一版生成于过程记录上线前，没有过程数据。重新生成一次即可看到。
+        </text>
       </view>
 
       <view class="foot">
@@ -586,6 +803,127 @@ function onKey(e: KeyboardEvent): void {
   font-size: 12px;
   line-height: 1.7;
   color: var(--muted);
+}
+
+/* ---------- 过程 ---------- */
+/*
+ * 一条细线隔开「结论」和「过程」：这两块的可信度不是一回事 ——
+ * 上面每条都有可回查的引用，下面是流水线的计数器。混在一起会互相借光。
+ */
+.proc {
+  margin-top: 12px;
+  padding-top: 6px;
+  border-top: 0.5px solid var(--line);
+}
+/* 与「过程」同一位置的一行说明：没有过程时，那根线照样在，用户才不会以为这里是空的 */
+.proc-gap {
+  display: block;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--line);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+.proc-hd {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 0;
+  cursor: pointer;
+}
+.proc-ar {
+  display: inline-block;
+  width: 10px;
+  font-size: 11px;
+  color: var(--dim);
+  transition: transform 0.16s ease;
+}
+.proc-ar.open {
+  transform: rotate(90deg);
+}
+.proc-t {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.proc-n {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--dim);
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.proc-list {
+  padding: 2px 0 6px;
+}
+.proc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0 3px 14px;
+  /* 新到的一行淡入。覆盖同一步时 key 不变、节点被复用，所以不会重播 ——
+     这一点很重要：模型那步从「等待中」变成「9.9 秒」时若整块闪一下，看着像出错了 */
+  animation: procIn 0.18s ease-out;
+}
+@keyframes procIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 正在跑的那一步：左边一个呼吸的点。放在已有的 14px 缩进里，
+   不新增行高 —— 过程区每多一行都是从结论那里抢来的高度 */
+.proc-row.live {
+  position: relative;
+}
+.proc-row.live::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: procPulse 1.1s ease-in-out infinite;
+}
+@keyframes procPulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+.proc-l {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--dim);
+  min-width: 54px;
+}
+.proc-v {
+  margin-left: auto;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+/* hint 单独占一行：和 label/value 挤一行时，390px 下「含正文 48 条，仅标题 21 条」会被折成两截 */
+.proc-h {
+  flex-basis: 100%;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--dim);
+  opacity: 0.72;
 }
 
 /* ---------- 底部 ---------- */

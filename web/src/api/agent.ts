@@ -1,4 +1,5 @@
-import { request } from './http'
+import { request, ApiError } from './http'
+import { streamPost } from './sse'
 
 /**
  * 主线（模板分析）的接口契约，见 docs/agent-plan.md §9。
@@ -12,6 +13,20 @@ import { request } from './http'
 export interface AgentBullet {
   text: string
   refs: number[]
+}
+
+/**
+ * 「过程」里的一步：确定性数字，不是模型的思考。
+ *
+ * <p>{@code label} 与 {@code value} 都被后端压到很短（6 / 10 字），
+ * 前端不截断 —— 截出来的半句比折行更难看。{@code hint} 另起一行小字。
+ */
+export interface AgentStep {
+  /** scan / filter / merge / pack / guard / delta / llm / cite */
+  k: string
+  label: string
+  value: string
+  hint?: string | null
 }
 
 export interface AgentMeta {
@@ -43,6 +58,11 @@ export interface AgentResult {
   note?: string | null
   /** 语气：stale 表示眼前是旧结论（回退），要转琥珀并挂「旧版」；info 用最弱的灰 */
   noteKind?: 'info' | 'stale' | null
+  /**
+   * 这份结论是怎么来的。老数据为空数组（那时还没记过程），前端据此不渲染那一块。
+   * 缓存命中时读的是库里那份，所以它能解释「昨天那版」而不是「这次将要做什么」。
+   */
+  steps?: AgentStep[]
   meta: AgentMeta
 }
 
@@ -86,6 +106,8 @@ export interface AgentPrecheck {
   remaining: number
   note?: string | null
   detail?: string | null
+  /** 拒答时也有：过程会停在「材料校验 不足」，hint 就是拒答原因 */
+  steps?: AgentStep[]
 }
 
 export function agentTemplates(): Promise<{ items: AgentTemplate[] }> {
@@ -106,13 +128,57 @@ export function agentPrecheck(templateId: string, keywords = ''): Promise<AgentP
 /**
  * 真生成。超时给到 2 分钟：后端同步等模型，输入一万 token 的 prefill 本身就要几秒，
  * 默认 15 秒会在慢响应上误判失败 —— 而失败的那次钱已经花出去了。
+ *
+ * <p><b>新代码请用 {@link agentAskStream}</b>：这个接口要等十几秒才有一个字节回来，
+ * 界面上那段时间是死的。保留它是因为它最简单 —— 脚本、curl、老版本客户端都还能用。
  */
-export function agentAsk(templateId: string, keywords = ''): Promise<AgentResult> {
+export function agentAsk(templateId: string, keywords = '', force = false): Promise<AgentResult> {
   return request<AgentResult>('/api/agent/ask', {
     method: 'POST',
-    body: { templateId, keywords: keywords || undefined },
+    body: { templateId, keywords: keywords || undefined, force: force || undefined },
     timeout: 120000
   })
+}
+
+export interface AgentStreamHooks {
+  /** 流已建立。这一刻起才该把按钮切成"生成中" —— 之前都是"还没发出去" */
+  onOpen?: () => void
+  /** 走完一步。同 k 覆盖：模型那步会先来「等待中」，再来「9.9 秒」 */
+  onStep?: (s: AgentStep) => void
+  /** 终态。结构与 {@link agentAsk} 的返回值完全一致，所以收尾逻辑不用写两套 */
+  onDone?: (r: AgentResult) => void
+  onError?: (e: ApiError) => void
+  /** 流结束（正常或失败都会调），收尾用。放在这里清计时器最省心：只有这一条出口 */
+  onClose?: () => void
+}
+
+/**
+ * 真生成，过程一行一行推回来。
+ *
+ * <p><b>为什么值得多这么一层</b>：一次生成 6.9–32.9 秒（近十次实测），其中取数打包只占
+ * 几十毫秒，剩下全是等模型。一次性返回的形态下，这十几秒里用户能看到的只有
+ * "生成中"三个字 —— 而取数那几行其实早就有了，只是压着没给。
+ *
+ * @returns 中止函数。关浮层、换模板时必须调 —— 但要知道它<b>不会</b>让服务端停下：
+ *          模型已经发出去了，钱照花，结论照落库，只是没人听
+ */
+export function agentAskStream(
+  templateId: string,
+  keywords: string,
+  force: boolean,
+  hooks: AgentStreamHooks
+): () => void {
+  return streamPost(
+    '/api/agent/ask/stream',
+    { templateId, keywords: keywords || undefined, force: force || undefined },
+    {
+      onOpen: hooks.onOpen,
+      onStep: (d) => hooks.onStep?.(d as AgentStep),
+      onDone: (d) => hooks.onDone?.(d as AgentResult),
+      onError: hooks.onError,
+      onClose: hooks.onClose
+    }
+  )
 }
 
 /** 结果快照：缓存命中时直接按 runId 把结论读回来，不用再让用户点一次。 */

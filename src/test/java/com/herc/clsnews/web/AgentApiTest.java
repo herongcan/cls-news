@@ -71,7 +71,8 @@ class AgentApiTest {
         service = new AgentService(new AgentCatalog(), new Retrieval(jdbc), new AgentRunStore(jdbc),
                 llm, new SingleFlight(), props, mapper);
         mvc = MockMvcBuilders
-                .standaloneSetup(new AgentController(service, new AgentCatalog(), props))
+                .standaloneSetup(new AgentController(service, new AgentCatalog(), props,
+                        new AgentStreams()))
                 .build();
     }
 

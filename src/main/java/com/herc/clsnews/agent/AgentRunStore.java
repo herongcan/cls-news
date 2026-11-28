@@ -32,8 +32,8 @@ public class AgentRunStore {
     /** 别名 {@code r}：{@link #ROW} 与各处 SQL 共用同一份列清单，加字段只改一处。 */
     private static final String COLUMNS = """
             r.id, r.template_id, r.window_key, r.strategy, r.base_run_id, r.watermark, r.status,
-            r.answer_json, r.citations_json, r.candidates, r.tokens_in, r.tokens_out,
-            r.model, r.created_at
+            r.answer_json, r.citations_json, r.steps_json, r.candidates, r.tokens_in,
+            r.tokens_out, r.model, r.created_at
             """;
 
     private static final RowMapper<RunRow> ROW = (rs, i) -> new RunRow(
@@ -46,6 +46,7 @@ public class AgentRunStore {
             rs.getString("status"),
             rs.getString("answer_json"),
             rs.getString("citations_json"),
+            rs.getString("steps_json"),
             rs.getInt("candidates"),
             rs.getInt("tokens_in"),
             rs.getInt("tokens_out"),
@@ -56,6 +57,28 @@ public class AgentRunStore {
 
     public AgentRunStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        // 老库没有 steps_json（这一列是「过程」功能加的）。SQLite 的 ALTER TABLE
+        // 没有 ADD COLUMN IF NOT EXISTS，重复执行会抛错，所以吞掉 —— 与 analysis_call
+        // 补 actor 列是同一套做法。表还不存在时这里也会失败，随后 schema.sql 会带着新列建表。
+        try {
+            jdbc.execute("ALTER TABLE agent_run ADD COLUMN steps_json TEXT");
+        } catch (Exception ignored) {
+            // 已经有了
+        }
+    }
+
+    /**
+     * 补写「过程」。独立于终态写入，是为了不改动 {@code markSucceeded} /
+     * {@code markFailed} 那几处已有的调用契约 —— 那些调用点有各自的 token 记账含义，
+     * 为了多带一列去改签名，很容易在某次改动里把 token 传错。
+     *
+     * @param stepsJson null 时不覆盖：缓存命中的旧行没有过程，不应该被清成空
+     */
+    public void stampSteps(String runId, String stepsJson) {
+        if (stepsJson == null || stepsJson.isBlank()) {
+            return;
+        }
+        jdbc.update("UPDATE agent_run SET steps_json = ? WHERE id = ?", stepsJson, runId);
     }
 
     /**
@@ -113,9 +136,29 @@ public class AgentRunStore {
                 candidates, clip(reason, 500), t, t);
     }
 
+    /**
+     * 让同键那条已完成的记录退出"当前版本"，好让强制重算写出一条新的。
+     *
+     * <p>唯一索引覆盖 {@code running} 与 {@code succeeded}（见 schema 的 uq_brief_active），
+     * 不先让位，新的 INSERT 会被判成"已经生成好了"，force 就变成了一句空话。
+     *
+     * <p><b>不删行</b>：那一版的钱确实花过，结论也真的存在过。删掉会让账单和库对不上，
+     * 也会让"这一版为什么被替换"无据可查。superseded 只表示"它不再是当前版本"。
+     *
+     * @return 让位的行数（0 = 本来就没有同键记录）
+     */
+    int supersede(String templateId, String windowKey, long watermark, String paramsJson) {
+        return jdbc.update("""
+                UPDATE agent_run
+                   SET status = 'superseded'
+                 WHERE template_id = ? AND window_key = ? AND watermark = ?
+                   AND IFNULL(params_json,'') = IFNULL(?,'')
+                   AND status = 'succeeded' AND kind = 'template'
+                """, templateId, windowKey, watermark, paramsJson);
+    }
+
     /** 同键当前处于 running 或 succeeded 的那一行（最多一条，由唯一索引保证）。 */
-    Optional<RunRow> findActive(String templateId, String windowKey, long watermark, String paramsJson) {
-        List<RunRow> rows = jdbc.query("""
+    Optional<RunRow> findActive(String templateId, String windowKey, long watermark, String paramsJson) {        List<RunRow> rows = jdbc.query("""
                 SELECT %s FROM agent_run r
                  WHERE r.template_id = ? AND r.window_key = ? AND r.watermark = ?
                    AND IFNULL(r.params_json,'') = IFNULL(?,'')
@@ -396,7 +439,7 @@ public class AgentRunStore {
     /** 一段时间内的运行汇总。空集合下 SUM/MIN 全是 NULL，必须 COALESCE，否则拆箱 NPE。 */
     public Stats statsSince(long since) {
         return jdbc.queryForObject("""
-                SELECT COALESCE(SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END), 0) AS ok,
+                SELECT COALESCE(SUM(CASE WHEN status IN ('succeeded','superseded') THEN 1 ELSE 0 END), 0) AS ok,
                        COALESCE(SUM(CASE WHEN status='failed'    THEN 1 ELSE 0 END), 0) AS bad,
                        COALESCE(SUM(CASE WHEN status='rejected'  THEN 1 ELSE 0 END), 0) AS rej,
                        COALESCE(SUM(CASE WHEN status='running'   THEN 1 ELSE 0 END), 0) AS busy,
@@ -480,6 +523,8 @@ public class AgentRunStore {
             String status,
             String answerJson,
             String citationsJson,
+            /** 过程步骤的 JSON 数组；老数据与缓存命中时为 null */
+            String stepsJson,
             int candidates,
             int tokensIn,
             int tokensOut,

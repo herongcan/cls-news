@@ -55,6 +55,17 @@ const bullets = computed(() => result.value?.bullets ?? [])
  */
 const liveSteps = ref<AgentStep[]>([])
 /**
+ * 生成中，模型逐段推回来的思考文本。
+ *
+ * <p>和 {@code result.steps} 里 {@code k='reasoning'} 那行的 hint 是同一份，不同时刻：
+ * 这里是在跑的增量，那里是落库后的全文。分开存，因为生成中 result 还是上一版。
+ */
+const liveReasoning = ref('')
+/** 思考卡片展开态：生成中强制展开看它实时滚动，完成后折叠成摘要 */
+const showReasoning = ref(false)
+/** 卡片展开后，正文是否显示全文（否则只露前 N 字） */
+const reasoningFull = ref(false)
+/**
  * 这份结论是「这次刚流式生成出来的」还是「读回来的」。
  *
  * <p>只在 onDone 那一刻置 true，用来压住"第一次见过程自动展开"—— 那次展开的
@@ -89,10 +100,35 @@ let manualStop = false
  * 正在跑的新一次下面，数字全对不上。
  */
 const steps = computed<AgentStep[]>(() => {
-  if (liveSteps.value.length) return liveSteps.value
-  return result.value?.steps ?? rejected.value?.steps ?? []
+  const src = liveSteps.value.length ? liveSteps.value : result.value?.steps ?? rejected.value?.steps ?? []
+  // reasoning 单独成「思考」卡片，不进过程列表 —— 它的 hint 是几百字的思考全文，
+  // 塞进 7 行过程里会把整块撑爆
+  return src.filter((s) => s.k !== 'reasoning')
 })
 const showSteps = ref(false)
+
+/**
+ * 模型的思考全文。
+ *
+ * <p>生成中读实时增量（{@code liveReasoning}），完成后从落库的 steps 里找
+ * {@code k='reasoning'} 那行的 hint。两处必居其一：生成中 liveReasoning 有值，
+ * 落库后 reasoning 那行带着全文。都空 = 这次没要到思考（或老数据）。
+ */
+const reasoningText = computed<string>(() => {
+  if (liveReasoning.value) return liveReasoning.value
+  const src = result.value?.steps ?? rejected.value?.steps ?? []
+  const r = src.find((s) => s.k === 'reasoning')
+  return r?.hint || ''
+})
+
+/** 思考卡片默认只露前 N 字，点「展开」看全文。N 给 120：折叠时约两行，不挤结论 */
+const REASONING_PREVIEW = 120
+const reasoningPreview = computed(() => {
+  const t = reasoningText.value
+  if (t.length <= REASONING_PREVIEW) return t
+  return t.slice(0, REASONING_PREVIEW)
+})
+const reasoningTruncated = computed(() => reasoningText.value.length > REASONING_PREVIEW)
 
 /**
  * 往 liveSteps 里放一行：同 k 覆盖，否则追加。
@@ -348,7 +384,10 @@ async function refresh(): Promise<void> {
   // 否则上一份结论展开着、新结论还没到，会看到一段对不上的数字。
   // liveSteps 也要清：那是上一次生成推过来的，留着会挂在新结论下面
   showSteps.value = false
+  showReasoning.value = false
+  reasoningFull.value = false
   liveSteps.value = []
+  liveReasoning.value = ''
   clearTicker()
   waited.value = 0
   try {
@@ -387,6 +426,7 @@ function run(): void {
   // 那一小段界面必须已经变了，否则点完像是没反应
   busy.value = 'run'
   liveSteps.value = []
+  liveReasoning.value = ''
   waited.value = 0
   manualStop = false
   clearTicker()
@@ -403,6 +443,11 @@ function run(): void {
 
   stopStream = agentAskStream(active.value, applied.value, force, {
     onStep: pushStep,
+    onReasoning: (chunk) => {
+      // 思考逐段进来：追加到卡片里，并确保它展开着（用户在等的就是这段在动）
+      liveReasoning.value += chunk
+      showReasoning.value = true
+    },
     onDone: (r) => {
       if (r.status === 'rejected') {
         result.value = null
@@ -414,9 +459,13 @@ function run(): void {
       // 结论到了就交还给库里那份：内容与 liveSteps 相同（同一次生成），
       // 但以 done 为准，才能保证"界面显示的"和"按 runId 查到的"永远一致
       liveSteps.value = []
+      // 思考同理：实时增量清空，落库后的全文从 result.steps 里读（reasoningText 会切过去）
+      liveReasoning.value = ''
       // 结果出来了，过程收起来：过程的价值在"生成中看着它动"，结论到了就该把屏幕还给主线。
       // 想看过程的人自己点开 —— 这里不再替他展开（展开的默认值交给"第一次看过"那次）
       showSteps.value = false
+      showReasoning.value = false
+      reasoningFull.value = false
       // 标记"这次是刚生成的"，压住 watch 的"第一次见过程自动展开"，避免结果又被顶开
       justStreamed = true
     },
@@ -551,6 +600,31 @@ function onKey(e: KeyboardEvent): void {
                 @tap="emit('pick', r)"
               >[[{{ r }}]]</text>
             </view>
+          </view>
+        </view>
+
+        <!-- 思考：模型逐段吐的过程，独立成卡片。生成中实时滚动，完成后折叠成摘要 -->
+        <view v-if="reasoningText" class="think">
+          <view class="think-hd" @tap="showReasoning = !showReasoning">
+            <text class="proc-ar" :class="{ open: showReasoning }">›</text>
+            <text class="think-t">思考</text>
+            <text class="think-n">
+              {{ busy === 'run' ? '正在思考…' : reasoningText.length + ' 字' }}
+            </text>
+          </view>
+          <view v-if="showReasoning" class="think-body">
+            <!-- 只露前 N 字；全文要再点一次「展开全文」。折叠成摘要时不显示正文 -->
+            <text class="think-txt">{{ reasoningFull ? reasoningText : reasoningPreview }}</text>
+            <text
+              v-if="reasoningTruncated && !reasoningFull"
+              class="think-more"
+              @tap="reasoningFull = true"
+            >展开全文</text>
+            <text
+              v-else-if="reasoningTruncated && reasoningFull"
+              class="think-more"
+              @tap="reasoningFull = false"
+            >收起</text>
           </view>
         </view>
 
@@ -847,6 +921,54 @@ function onKey(e: KeyboardEvent): void {
   font-size: 12px;
   line-height: 1.7;
   color: var(--muted);
+}
+
+/* ---------- 思考 ---------- */
+/*
+ * 思考卡片和「过程」是两回事：过程是代码算出来的确定性数字，思考是模型自述的推理。
+ * 后者的可信度低一档（不可验证），所以视觉上更轻、和结论之间不加那根「可信度分界」线，
+ * 只是并列在过程上面。标题行复用 .proc-hd / .proc-ar 的折叠交互，不另造一套箭头。
+ */
+.think {
+  margin-top: 12px;
+  padding-top: 6px;
+  border-top: 0.5px solid var(--line);
+}
+.think-hd {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 0;
+  cursor: pointer;
+}
+.think-t {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.think-n {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--amber);
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+.think-body {
+  padding: 2px 0 6px 14px;
+}
+.think-txt {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+  /* 思考是多段连续文本，pre-wrap 保留模型吐出来的换行，别挤成一大坨 */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.think-more {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--amber);
+  opacity: 0.9;
 }
 
 /* ---------- 过程 ---------- */

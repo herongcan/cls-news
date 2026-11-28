@@ -25,10 +25,23 @@ public final class Proc {
     /** 往外推的口。传输层实现它（SSE emitter / 什么也不做）。 */
     public interface Sink {
         void step(Step s);
+
+        /**
+         * 推一段思考文本。
+         *
+         * <p>与 {@link #step} 的区别：step 是「一步完成后的快照」，reasoning 是「进行中的增量」——
+         * 模型边想边吐，每吐一段就回调一次。默认空实现，同步路径（{@code NOOP}）和
+         * 不关心思考的传输层都不用改。
+         */
+        default void reasoning(String chunk) {
+        }
     }
 
     /** 同步路径用：只攒列表，不推。 */
-    public static final Sink NOOP = s -> {
+    public static final Sink NOOP = new Sink() {
+        @Override
+        public void step(Step s) {
+        }
     };
 
     private final List<Step> steps = new ArrayList<>(8);
@@ -93,6 +106,21 @@ public final class Proc {
 
     public int size() {
         return steps.size();
+    }
+
+    /**
+     * 把一段思考增量透传给 sink。
+     *
+     * <p>思考文本<b>不进 steps 列表</b>：列表里每行是一个已完成步骤，而思考是流式的、
+     * 会被覆盖几十次的中间态。它由调用方攒全后，再合成一个 {@code k="reasoning"} 的
+     * {@link Step} 落库（见 {@link Steps#reasoning}）。这里只负责「实时透传」这一半。
+     */
+    public void reasoning(String chunk) {
+        try {
+            sink.reasoning(chunk);
+        } catch (Exception ignored) {
+            // 同 step 的吞异常：断线是传输层的事，不连带这次生成废掉
+        }
     }
 
     private void push(Step s) {

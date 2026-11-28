@@ -90,6 +90,22 @@ public final class Steps {
                 : Step.of("cite", "引用校验", "全部有效");
     }
 
+    /**
+     * 模型的思考过程，落库用。
+     *
+     * <p>注意它和 {@code llm} 那一步的关系：{@code llm} 记的是「调用模型花了多久」，
+     * 这一行记的是「模型想了什么」。思考全文塞进 {@code hint}（纯文本，不掺别的），
+     * 前端把它抽成「思考」卡片展示，value 只作占位不展示。
+     *
+     * @param reasoningText 思考全文，空/null 时不产生这一行（没要到思考就不写，别留空行）
+     */
+    public static Step reasoning(String reasoningText) {
+        if (reasoningText == null || reasoningText.isBlank()) {
+            return null;
+        }
+        return new Step("reasoning", "思考", "已思考", reasoningText.trim());
+    }
+
     private static String oneDecimal(double v) {
         return String.valueOf(Math.round(v * 10) / 10.0);
     }

@@ -130,6 +130,19 @@ class StepsTest {
     }
 
     @Test
+    @DisplayName("思考全文塞进 hint，空文本不产生这一行")
+    void reasoningCarriesFullText() {
+        Step s = Steps.reasoning("先看标题，再看引用编号……");
+
+        assertThat(s.k()).isEqualTo("reasoning");
+        assertThat(s.label()).isEqualTo("思考");
+        assertThat(s.hint()).isEqualTo("先看标题，再看引用编号……");
+
+        assertThat(Steps.reasoning(null)).isNull();
+        assertThat(Steps.reasoning("   ")).isNull();
+    }
+
+    @Test
     @DisplayName("存进 steps_json 再读回来，字段一个不少")
     void jsonRoundTrip() throws Exception {
         ObjectMapper mapper = new ObjectMapper();

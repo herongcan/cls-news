@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 主线编排的分支测试，全部用假模型。
@@ -186,6 +187,66 @@ class AgentServiceTest {
         // "事后按 runId 查到的"是两套数字，而排障时人只会信后者
         assertEquals(r.steps(), lastByKey(pushed));
         assertEquals(r.steps(), service.snapshot(r.runId()).orElseThrow().steps());
+    }
+
+    @Test
+    @DisplayName("流式：模型思考逐段推给 sink，全文落库成 reasoning 那行")
+    void reasoningStreamedAndPersisted() {
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+        llm.reasoning = "先扫标题找主题，再核对引用编号是否在候选集里";
+
+        List<String> chunks = new ArrayList<>();
+        List<Step> pushed = new ArrayList<>();
+        Proc.Sink sink = new Proc.Sink() {
+            @Override
+            public void step(Step s) {
+                pushed.add(s);
+            }
+
+            @Override
+            public void reasoning(String chunk) {
+                chunks.add(chunk);
+            }
+        };
+
+        AgentService.Result r = service.ask("hot-today", null, false, "admin", null, sink);
+
+        // 思考被切成了若干段逐段推（FakeLlm 按长度切三段），拼起来是全文
+        assertFalse(chunks.isEmpty(), "模型吐了思考就该推给界面");
+        assertEquals(llm.reasoning, String.join("", chunks));
+
+        // 全文落库成 reasoning 那行，hint 是纯思考文本
+        assertThat(r.steps()).anyMatch(s -> "reasoning".equals(s.k())
+                && llm.reasoning.equals(s.hint()));
+        // 读回旧结论时（snapshot），reasoning 那行还在 —— 思考卡片不能只在生成中可见
+        assertThat(service.snapshot(r.runId()).orElseThrow().steps())
+                .anyMatch(s -> "reasoning".equals(s.k()));
+    }
+
+    @Test
+    @DisplayName("模型不吐思考时不产生 reasoning 行，也不推空段")
+    void noReasoningProducesNoStep() {
+        List<Long> ids = seed(6);
+        llm.content = answerWith(ids.subList(0, 2));
+        llm.reasoning = null;
+
+        List<String> chunks = new ArrayList<>();
+        Proc.Sink sink = new Proc.Sink() {
+            @Override
+            public void step(Step s) {
+            }
+
+            @Override
+            public void reasoning(String chunk) {
+                chunks.add(chunk);
+            }
+        };
+
+        AgentService.Result r = service.ask("hot-today", null, false, "admin", null, sink);
+
+        assertTrue(chunks.isEmpty());
+        assertThat(r.steps()).noneMatch(s -> "reasoning".equals(s.k()));
     }
 
     @Test
@@ -772,6 +833,8 @@ class AgentServiceTest {
         private long delayMs;
         private int tokensIn = 8_600;
         private int tokensOut = 380;
+        /** 模拟推理模型吐思考过程；null = 不吐 */
+        private String reasoning = null;
 
         @Override
         public synchronized Reply chat(String system, String user) throws Exception {
@@ -787,7 +850,32 @@ class AgentServiceTest {
             if (failure != null) {
                 throw failure;
             }
-            return new Reply(content, tokensIn, tokensOut, "fake-model", 120);
+            return new Reply(content, tokensIn, tokensOut, "fake-model", 120, reasoning, 0);
+        }
+
+        @Override
+        public synchronized Reply chatStream(String system, String user,
+                                              java.util.function.Consumer<String> onReasoning) throws Exception {
+            calls++;
+            lastUser = user;
+            if (delayMs > 0) {
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+            // 模拟流式：把思考切成几段逐段吐
+            if (reasoning != null && onReasoning != null) {
+                int step = Math.max(1, reasoning.length() / 3);
+                for (int i = 0; i < reasoning.length(); i += step) {
+                    onReasoning.accept(reasoning.substring(i, Math.min(i + step, reasoning.length())));
+                }
+            }
+            return new Reply(content, tokensIn, tokensOut, "fake-model", 120, reasoning, 0);
         }
 
         @Override

@@ -20,13 +20,15 @@ import { readTokens } from './credentials'
  */
 
 /** 服务端事件名，与 AgentController.askStream 一一对应 */
-export type SseEvent = 'open' | 'step' | 'done' | 'error'
+export type SseEvent = 'open' | 'step' | 'reasoning' | 'done' | 'error'
 
 export interface StreamHandlers {
   /** 流已建立，生成开始。这一刻起才该切"生成中" */
   onOpen?: () => void
   /** 走完一步。同一 k 的后来者应覆盖前者（模型那步从「等待中」变成「9.9 秒」） */
   onStep?: (data: unknown) => void
+  /** 模型思考过程的一段增量文本，逐段追加 */
+  onReasoning?: (chunk: string) => void
   onDone?: (data: unknown) => void
   /** 失败。4xx/5xx（开流前就被挡）与流内 error 事件都从这里出 */
   onError?: (e: ApiError) => void
@@ -156,6 +158,7 @@ function dispatch(f: Frame, h: StreamHandlers): void {
   }
   if (f.event === 'open') h.onOpen?.()
   else if (f.event === 'step') h.onStep?.(body)
+  else if (f.event === 'reasoning') h.onReasoning?.(body as string)
   else if (f.event === 'done') h.onDone?.(body)
   else if (f.event === 'error') {
     const e = body as { code?: string; error?: string }

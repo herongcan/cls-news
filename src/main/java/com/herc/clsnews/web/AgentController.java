@@ -6,6 +6,7 @@ import com.herc.clsnews.agent.AgentService;
 import com.herc.clsnews.agent.AgentTemplate;
 import com.herc.clsnews.agent.Answer;
 import com.herc.clsnews.agent.Proc;
+import com.herc.clsnews.agent.Step;
 import com.herc.clsnews.config.AppProps;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -144,6 +145,8 @@ public class AgentController {
      * <ul>
      *   <li>{@code open} —— 流已建立，生成开始。前端据此把按钮切成"生成中"</li>
      *   <li>{@code step} —— 走完一步。data 就是一个 {@code Step}</li>
+     *   <li>{@code reasoning} —— 模型的思考过程，逐段推送。data 是一段纯文本增量，
+     *       前端逐段追加到「思考」卡片，直到下一步 step / done 到达</li>
      *   <li>{@code done} —— 终态，data 与 {@link #ask} 的响应体<b>完全同构</b>，
      *       所以缓存命中、拒答、失败这几种收尾不需要前端写第二套解析</li>
      *   <li>{@code error} —— 生成没能开始或中途炸了。{@code code} 与同步接口一致</li>
@@ -194,8 +197,19 @@ public class AgentController {
                 push(emitter, closed, SseEmitter.event().name("open")
                         .data(Map.of("at", System.currentTimeMillis()), MediaType.APPLICATION_JSON));
 
-                Proc.Sink sink = step -> push(emitter, closed, SseEmitter.event().name("step")
-                        .data(step, MediaType.APPLICATION_JSON));
+                Proc.Sink sink = new Proc.Sink() {
+                    @Override
+                    public void step(Step s) {
+                        push(emitter, closed, SseEmitter.event().name("step")
+                                .data(s, MediaType.APPLICATION_JSON));
+                    }
+
+                    @Override
+                    public void reasoning(String chunk) {
+                        push(emitter, closed, SseEmitter.event().name("reasoning")
+                                .data(chunk, MediaType.APPLICATION_JSON));
+                    }
+                };
 
                 AgentService.Result r = agent.ask(templateId, keywords, force, actor, cap, sink);
                 push(emitter, closed, SseEmitter.event().name("done")

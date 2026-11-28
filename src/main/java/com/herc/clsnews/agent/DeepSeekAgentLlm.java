@@ -17,10 +17,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 /**
  * DeepSeek 实现，走 {@code POST /chat/completions}，单次、无 tools。
@@ -93,7 +97,7 @@ public class DeepSeekAgentLlm implements AgentLlm {
             throw new IllegalStateException("API key 未配置，无法生成主线");
         }
         AppProps.Agent cfg = props.getAgent();
-        String payload = buildPayload(cfg, system, user);
+        String payload = buildPayload(cfg, system, user, false);
 
         HttpResponse<String> resp = null;
         Exception last = null;
@@ -151,13 +155,116 @@ public class DeepSeekAgentLlm implements AgentLlm {
         return parse(resp.body(), latency);
     }
 
-    private String buildPayload(AppProps.Agent cfg, String system, String user) throws Exception {
+    /**
+     * 流式调用：正文攒满一次性给，思考过程逐段回调。
+     *
+     * <p><b>为什么不重试</b>：{@link #chat} 能重试是因为「一次失败 = 什么都没给出去」。
+     * 流式已经把思考推了几十段给前端，半路失败再重发，前端看到的是「思考重头再来一遍」——
+     * 那比直接报错更糟。所以这里一次失败即失败，与 {@code chat} 里「超时不重试」是同一个理由。
+     *
+     * <p><b>超时语义</b>：{@code HttpRequest.timeout} 对 {@code BodyHandlers.ofInputStream}
+     * 的流式读取不生效（流建立后一直有字节进出），所以超时靠外层 {@code future.get} 拉不动、
+     * 只能自己在前端/上层兜。这里退而求其次：整体不设硬超时，交给调用方的总闸
+     * （{@code askStream} 的 emitter 超时）去掐。
+     */
+    @Override
+    public Reply chatStream(String system, String user, Consumer<String> onReasoning) throws Exception {
+        if (apiKey == null) {
+            throw new IllegalStateException("API key 未配置，无法生成主线");
+        }
+        AppProps.Agent cfg = props.getAgent();
+        String payload = buildPayload(cfg, system, user, true);
+        long started = System.currentTimeMillis();
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(trimSlash(baseUrl) + "/chat/completions"))
+                .timeout(Duration.ofMillis(cfg.getTimeoutMs() + 30_000L))
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                .build();
+
+        HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        if (resp.statusCode() != 200) {
+            // 非 200 时 body 是普通 JSON（不是 SSE），按老逻辑读错误
+            String body = new String(resp.body().readAllBytes(), StandardCharsets.UTF_8);
+            throw new IllegalStateException(describe(resp.statusCode(), body));
+        }
+
+        StringBuilder content = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
+        int tokensIn = 0;
+        int tokensOut = 0;
+        int reasoningTokens = 0;
+
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank() || line.startsWith(":")) {
+                    continue; // 心跳注释行 / 空行
+                }
+                if (!line.startsWith("data:")) {
+                    continue;
+                }
+                String data = line.substring(5).trim();
+                if ("[DONE]".equals(data)) {
+                    break;
+                }
+                JsonNode node = mapper.readTree(data);
+                JsonNode delta = node.path("choices").path(0).path("delta");
+
+                JsonNode rc = delta.path("reasoning_content");
+                if (rc.isTextual() && !rc.asText().isEmpty()) {
+                    reasoning.append(rc.asText());
+                    if (onReasoning != null) {
+                        onReasoning.accept(rc.asText());
+                    }
+                }
+                JsonNode c = delta.path("content");
+                if (c.isTextual() && !c.asText().isEmpty()) {
+                    content.append(c.asText());
+                }
+
+                // 最后一个 chunk（开了 include_usage）会带 usage
+                JsonNode usage = node.path("usage");
+                if (usage.isObject() && usage.path("prompt_tokens").isInt()) {
+                    tokensIn = usage.path("prompt_tokens").asInt();
+                    tokensOut = usage.path("completion_tokens").asInt();
+                    JsonNode rt = usage.path("completion_tokens_details").path("reasoning_tokens");
+                    reasoningTokens = rt.isInt() ? rt.asInt() : 0;
+                }
+            }
+        }
+
+        long latency = System.currentTimeMillis() - started;
+        String text = content.toString();
+        if (text.isBlank()) {
+            // 与 parse 里同样的判据：额度全被思考吃光，正文一个字没留
+            throw new LlmCallException("模型返回空内容（思考 " + reasoningTokens + " token 后正文为空），"
+                    + "调大 app.agent.max-tokens-out", tokensIn, tokensOut);
+        }
+        return new Reply(text, tokensIn, tokensOut, model, latency,
+                reasoning.length() == 0 ? null : reasoning.toString(), reasoningTokens);
+    }
+
+    private String buildPayload(AppProps.Agent cfg, String system, String user, boolean stream) throws Exception {
         ObjectNode body = mapper.createObjectNode();
         body.put("model", model);
         body.put("temperature", cfg.getTemperature());
         body.put("max_tokens", cfg.getMaxTokensOut());
         // 强制 JSON：不加这个，模型经常在 JSON 前面写一句"好的，以下是今日主线"
         body.putObject("response_format").put("type", "json_object");
+        if (stream) {
+            // 思考过程只要「低强度」就够：用户要看的是「它在想什么」，不是「它想得最周全」。
+            // 高 effort 会把 14 秒拉到 30 秒+、多花成倍的推理 token，对一段折叠着看的文字不划算。
+            body.put("stream", true);
+            body.put("reasoning_effort", "low");
+            // usage 只在最后一个 chunk 里给，且必须显式开这个开关 —— 不开就分不清
+            // reasoning token 和正文 token，思考那一步的账就记不了
+            body.putObject("stream_options").put("include_usage", true);
+        }
         ArrayNode messages = body.putArray("messages");
         messages.addObject().put("role", "system").put("content", system);
         messages.addObject().put("role", "user").put("content", user);

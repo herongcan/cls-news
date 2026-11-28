@@ -733,7 +733,9 @@ public class AgentService {
         AgentLlm.Reply reply;
         long started = System.currentTimeMillis();
         try {
-            reply = llm.chat(t.system(), user);
+            // 流式：思考过程逐段推给界面（proc::reasoning → sink → SSE），正文攒满随 reply 返回。
+            // 同步路径（/api/agent/ask）的 sink 是 NOOP，reasoning 增量被丢掉，只有全文随结果回来
+            reply = llm.chatStream(t.system(), user, proc::reasoning);
         } catch (LlmCallException e) {
             // 拿到了 usage 的失败：token 必须如实记。这类失败（截断、空正文）是 HTTP 200，
             // 钱已经花出去了，记 0 会让账单和库里的账永远对不上
@@ -758,6 +760,13 @@ public class AgentService {
         }
 
         proc.replace(Steps.llm(reply.latencyMs(), reply.tokensIn()));
+        // 思考过程：模型吐的逐段文本已经实时推给了界面，这里把全文合成一行落库，
+        // 让缓存命中 / 换设备读回旧结论时，思考卡片还能原样回来。
+        // reasoning() 内部对空文本返回 null，没要到思考就不留空行
+        Step reasoningStep = Steps.reasoning(reply.reasoning());
+        if (reasoningStep != null) {
+            proc.add(reasoningStep);
+        }
         runs.insertStep(runId, 2, "llm", user.length(), reply.content(),
                 reply.tokensIn(), reply.tokensOut(), reply.latencyMs(), null);
 

@@ -26,18 +26,42 @@ public interface AgentLlm {
      */
     Reply chat(String system, String user) throws Exception;
 
+    /**
+     * 流式调用：正文攒满后随 {@link Reply} 返回，<b>思考过程逐段回调</b>。
+     *
+     * <p>默认实现退回 {@link #chat}：不推思考、直接给整段结果。测试的假模型、
+     * 以及不支持流式的旧实现，都靠这个默认值免于改动 —— 它们没有思考可推。
+     * 真正的推理模型（{@code DeepSeekAgentLlm}）才重写它。
+     *
+     * @param onReasoning 收到一段思考文本时回调。可能被调 0 次（模型不吐思考），
+     *                    也可能被调几十次（按 chunk）。正文不在这里给 —— 见 {@link Reply#content}
+     * @return 正文 + 用量 + 完整的思考全文（{@link Reply#reasoning}）
+     */
+    default Reply chatStream(String system, String user,
+                             java.util.function.Consumer<String> onReasoning) throws Exception {
+        return chat(system, user);
+    }
+
     /** key 配好了才为 true。false 时调用方应直接回 503，而不是逐次去撞墙。 */
     boolean ready();
 
     String modelName();
 
     /**
-     * @param content  模型返回的正文（可能被 ```json 包裹，由解析器处理）
-     * @param tokensIn  prompt token
-     * @param tokensOut completion token
-     * @param model     模型自报的名字，用于核对线上到底跑的哪个
-     * @param latencyMs 本次耗时，写进 agent_step 排查首字节问题
+     * @param content        模型返回的正文（可能被 ```json 包裹，由解析器处理）
+     * @param tokensIn       prompt token
+     * @param tokensOut      completion token
+     * @param model          模型自报的名字，用于核对线上到底跑的哪个
+     * @param latencyMs      本次耗时，写进 agent_step 排查首字节问题
+     * @param reasoning      思考全文，可为 null（没要思考、或模型不吐）。落库用
+     * @param reasoningTokens 思考部分单独花的 token（来自 usage 的 reasoning_tokens，可能为 0）
      */
-    record Reply(String content, int tokensIn, int tokensOut, String model, long latencyMs) {
+    record Reply(String content, int tokensIn, int tokensOut, String model, long latencyMs,
+                 String reasoning, int reasoningTokens) {
+
+        /** 无思考的便捷构造：给 {@link #chat} 与不关心思考的调用方用。 */
+        public Reply(String content, int tokensIn, int tokensOut, String model, long latencyMs) {
+            this(content, tokensIn, tokensOut, model, latencyMs, null, 0);
+        }
     }
 }

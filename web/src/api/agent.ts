@@ -145,6 +145,8 @@ export interface AgentStreamHooks {
   onOpen?: () => void
   /** 走完一步。同 k 覆盖：模型那步会先来「等待中」，再来「9.9 秒」 */
   onStep?: (s: AgentStep) => void
+  /** 模型思考过程的一段增量文本。逐段追加，直到模型那步被覆盖成「9.9 秒」 */
+  onReasoning?: (chunk: string) => void
   /** 终态。结构与 {@link agentAsk} 的返回值完全一致，所以收尾逻辑不用写两套 */
   onDone?: (r: AgentResult) => void
   onError?: (e: ApiError) => void
@@ -174,6 +176,7 @@ export function agentAskStream(
     {
       onOpen: hooks.onOpen,
       onStep: (d) => hooks.onStep?.(d as AgentStep),
+      onReasoning: hooks.onReasoning,
       onDone: (d) => hooks.onDone?.(d as AgentResult),
       onError: hooks.onError,
       onClose: hooks.onClose

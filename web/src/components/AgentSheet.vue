@@ -123,6 +123,17 @@ function stepHint(s: AgentStep): string | undefined {
   return s.hint || undefined
 }
 
+/**
+ * 这一步是不是「正在跑」。
+ *
+ * <p>只有模型步有真正的 running 态：本地取数那几步是毫秒级，推回来时就已经完成，
+ * 不存在「进行中」阶段。模型步先推「等待中」占位、回来后 replace 成「9.9 秒」，
+ * 所以「值还是等待中」就等价于「这一步还在跑」。
+ */
+function isRunning(s: AgentStep): boolean {
+  return busy.value === 'run' && s.k === 'llm' && s.value === '等待中'
+}
+
 function clearTicker(): void {
   if (ticker) {
     clearInterval(ticker)
@@ -379,6 +390,10 @@ function run(): void {
   waited.value = 0
   manualStop = false
   clearTicker()
+  // 点「更新」的那一刻就展开过程区：哪怕第一个 step 还没推回来，
+  // 也要让人看到「过程从 0 开始重跑」—— 否则上一版折叠着、新过程还没到，
+  // 界面上是「结论变了但过程没动静」，会被读成"更新没重新生成过程"
+  showSteps.value = true
   ticker = setInterval(() => {
     waited.value += 1
   }, 1000)
@@ -539,13 +554,13 @@ function onKey(e: KeyboardEvent): void {
           </view>
         </view>
 
-        <!-- 过程：默认收起。结论是给人看的，过程是给「结论怎么来的」这个疑问看的 -->
+        <!-- 过程：生成中逐步骤展开，结果出来后收成「已完成」摘要条 -->
         <view v-if="steps.length" class="proc">
           <view class="proc-hd" @tap="showSteps = !showSteps">
             <text class="proc-ar" :class="{ open: showSteps }">›</text>
-            <text class="proc-t">生成过程</text>
+            <text class="proc-t">{{ busy === 'run' ? '思考过程' : '生成过程' }}</text>
             <!-- 生成中不说"5 步"：那个数字还在涨，报一个中途的数只会让人以为就这么多 -->
-            <text class="proc-n">{{ busy === 'run' ? '进行中' : steps.length + ' 步' }}</text>
+            <text class="proc-n">{{ busy === 'run' ? '进行中' : '已完成 · ' + steps.length + ' 步' }}</text>
           </view>
           <view v-if="showSteps" class="proc-list">
             <!-- key 用 k 不用下标：覆盖同一步（等待中 → 9.9 秒）时复用的是同一个节点，
@@ -554,10 +569,20 @@ function onKey(e: KeyboardEvent): void {
               v-for="s in steps"
               :key="s.k"
               class="proc-row"
-              :class="{ live: busy === 'run' && s === steps[steps.length - 1] }"
+              :class="{ running: isRunning(s), done: !isRunning(s) }"
             >
-              <text class="proc-l">{{ s.label }}</text>
-              <text class="proc-v">{{ s.value }}</text>
+              <!-- 状态图标：跑着是转圈，完成是对勾 -->
+              <view class="proc-ic" :class="{ run: isRunning(s) }">
+                <text v-if="isRunning(s)" class="proc-spin" />
+                <text v-else class="proc-tick">✓</text>
+              </view>
+              <text class="proc-l">{{ isRunning(s) ? '正在思考' : s.label }}</text>
+              <text class="proc-v">
+                <template v-if="isRunning(s)">
+                  <text class="proc-ellipsis"><text>·</text><text>·</text><text>·</text></text>
+                </template>
+                <template v-else>{{ s.value }}</template>
+              </text>
               <text v-if="stepHint(s)" class="proc-h">{{ stepHint(s) }}</text>
             </view>
           </view>
@@ -879,8 +904,8 @@ function onKey(e: KeyboardEvent): void {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 10px;
-  padding: 3px 0 3px 14px;
+  gap: 8px;
+  padding: 3px 0;
   /* 新到的一行淡入。覆盖同一步时 key 不变、节点被复用，所以不会重播 ——
      这一点很重要：模型那步从「等待中」变成「9.9 秒」时若整块闪一下，看着像出错了 */
   animation: procIn 0.18s ease-out;
@@ -895,33 +920,62 @@ function onKey(e: KeyboardEvent): void {
     transform: none;
   }
 }
-/* 正在跑的那一步：左边一个呼吸的点。放在已有的 14px 缩进里，
-   不新增行高 —— 过程区每多一行都是从结论那里抢来的高度 */
-.proc-row.live {
-  position: relative;
+/* 状态图标列：对勾（完成）或转圈（正在思考）。固定在行首占 14px，不参与换行 */
+.proc-ic {
+  width: 14px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.proc-row.live::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 50%;
-  width: 4px;
-  height: 4px;
-  margin-top: -2px;
+.proc-tick {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+  opacity: 0.85;
+}
+.proc-spin {
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--amber);
-  animation: procPulse 1.1s ease-in-out infinite;
+  border: 1.5px solid var(--amber);
+  border-top-color: transparent;
+  animation: procTurn 0.7s linear infinite;
 }
-@keyframes procPulse {
+@keyframes procTurn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 正在思考那一行的省略号：三个点依次跳动，替代静态的「已等 N 秒」，
+   让"在干活"这件事看得见，而不是一个冷冰冰的秒数 */
+.proc-ellipsis {
+  display: inline-flex;
+  gap: 2px;
+  letter-spacing: 1px;
+}
+.proc-ellipsis text {
+  animation: procDot 1.2s infinite;
+}
+.proc-ellipsis text:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.proc-ellipsis text:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes procDot {
   0%,
+  80%,
   100% {
-    opacity: 0.25;
-    transform: scale(0.8);
+    opacity: 0.2;
   }
-  50% {
+  40% {
     opacity: 1;
-    transform: scale(1.15);
   }
+}
+/* 正在思考的行：label 转成强调色，让"还没完成"和"已经完成"一眼分开 */
+.proc-row.running .proc-l {
+  color: var(--amber);
 }
 .proc-l {
   font-size: 11.5px;

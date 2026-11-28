@@ -76,6 +76,21 @@ public final class Proc {
         return Collections.unmodifiableList(steps);
     }
 
+    /**
+     * 清掉已经攒的行，换一批重推。
+     *
+     * <p>只有一个用处：缓存命中时，scan 阶段已经把「取数/剔除/打包」推了出去，
+     * 但那几行的数字是「这一次」扫出来的，而命中的是「上一次」的结论 —— 两份可能对不上。
+     * 与其让界面出现"取数 75 条 + 调用模型 28.5 秒"这种跨次拼接，不如整段换成
+     * 上次那份完整过程，和 note 里那句「数据没有变化，直接返回上一版」正好自洽。
+     *
+     * @param replacement 要重推的完整过程（通常来自上次落库的 steps_json）
+     */
+    public Proc reset(List<Step> replacement) {
+        steps.clear();
+        return addAll(replacement);
+    }
+
     public int size() {
         return steps.size();
     }

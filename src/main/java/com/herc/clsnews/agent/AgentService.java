@@ -178,6 +178,14 @@ public class AgentService {
                 // note 不能给 null：这是"用户又点了一次、结果没变"最常见的路径，
                 // 而浮层正是靠这句话回答"为什么这次没重算"。null 的话界面上什么都不说，
                 // 用户只会以为按钮坏了（S1.4 原型确认过这个场景）。
+                //
+                // 命中缓存也要把「上次那份完整过程」推出去：scan 已经推了「取数/打包」两行，
+                // 不补全的话，流式界面会停在"取数 2 行 → 戛然而止"，看着像过程跑到一半断了。
+                // 这里用上次落库的 steps 整段替换，和 note 的「数据没有变化」自洽。
+                List<Step> cachedSteps = readSteps(hit.get());
+                if (!cachedSteps.isEmpty()) {
+                    proc.reset(cachedSteps);
+                }
                 return toResult(hit.get(), true, Strategy.NOTE_SAME);
             }
         }
@@ -221,6 +229,11 @@ public class AgentService {
         if (ctx.mode() == Strategy.Mode.CACHE) {
             log.info("主线按新增不足返回上一版 template={} watermark={} base={} {}",
                     t.id(), in.watermark(), ctx.baseRow().id(), ctx.note());
+            // 同 findHit 缓存命中的处理：scan 已推了取数几行，这里补全成上次的完整过程
+            List<Step> cachedSteps = readSteps(ctx.baseRow());
+            if (!cachedSteps.isEmpty()) {
+                proc.reset(cachedSteps);
+            }
             return toResult(ctx.baseRow(), true, ctx.note());
         }
         log.info("主线策略 template={} strategy={} {} {}", t.id(), ctx.mode(), ctx.note(), pack.summary());

@@ -172,10 +172,17 @@ class AuthMatrixTest {
                 .as("演示的核心就是看模型怎么说").isTrue();
         assertThat(callWithToken("POST", "/api/visit/ping", guest, null).passed())
                 .as("访客上报没有副作用，禁掉的话游客访问不计入统计").isTrue();
+        assertThat(callWithToken("GET", "/api/agent/precheck", guest, null).passed())
+                .as("报价免费，游客当然要能看到「还剩几次」").isTrue();
+        assertThat(callWithToken("POST", "/api/agent/ask", guest, null).passed())
+                .as("app.agent.guest-daily-cap 就是为这条路配的；真钱闸在 AgentService 的配额里")
+                .isTrue();
 
         assertThat(callWithToken("GET", "/api/visits", guest, null).denied(403))
                 .as("访客数字是站主的运营数据，与演示无关").isTrue();
         assertThat(callWithToken("GET", "/api/visits/logs", guest, null).denied(403)).isTrue();
+        assertThat(callWithToken("GET", "/api/agent/health", guest, null).denied(403))
+                .as("体检里有全站 token 消耗和 key 状态，这是运维视角，不是演示内容").isTrue();
         assertThat(callWithToken("POST", "/api/news/1/analyze", guest, "true").denied(403))
                 .as("force 会无视新鲜度保护再花一次钱，只给运维").isTrue();
         assertThat(callWithToken("POST", "/api/news/1", guest, null).denied(403))
@@ -199,6 +206,12 @@ class AuthMatrixTest {
                 .as("明细里有别人的 IP 和 UA").isTrue();
         assertThat(callWithToken("POST", "/api/news/1/analyze", ro, null).denied(403))
                 .as("只读账号点分析就是烧钱").isTrue();
+        assertThat(callWithToken("GET", "/api/agent/precheck", ro, null).passed())
+                .as("只读账号看得到已有结论和报价，只是不能点下去").isTrue();
+        assertThat(callWithToken("POST", "/api/agent/ask", ro, null).denied(403))
+                .as("主线一次约 1 万 token，只读账号的定义就是不产生花费").isTrue();
+        assertThat(callWithToken("GET", "/api/agent/health", ro, null).passed())
+                .as("体检是纯读：不调模型、不写库，只读账号没有理由被挡在门外").isTrue();
     }
 
     // ---------- 令牌 ----------

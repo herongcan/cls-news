@@ -8,6 +8,8 @@ const props = defineProps<{
   keyword: string
   canAnalyze: boolean
   analyzing: boolean
+  /** 从主线浮层点引用跳过来时短暂高亮这一条，否则用户不知道该看哪一行 */
+  highlight?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'analyze'): void }>()
@@ -75,7 +77,7 @@ function openSource(): void {
 </script>
 
 <template>
-  <view class="item">
+  <view class="item" :class="{ flash: highlight }">
     <view class="time">
       <text class="hm">{{ t.hm }}</text>
       <text class="dd" :class="{ today: t.today }">{{ t.day }}</text>
@@ -133,6 +135,32 @@ function openSource(): void {
   gap: 14px;
   padding: 14px 0;
   border-bottom: 0.5px solid var(--line);
+}
+/*
+ * 从主线浮层点引用跳过来时的高亮：左侧一道竖线 + 极淡底色。
+ * 用 animation 而不是 class 切换，是为了让它自己消失 —— 用户滚走之后
+ * 一条一直发光的行会让人以为是未读。
+ */
+.item.flash {
+  animation: flash 1.6s ease-out;
+  border-left: 2px solid var(--amber);
+  padding-left: 10px;
+  margin-left: -12px;
+}
+@keyframes flash {
+  0%,
+  55% {
+    background: var(--mark-bg);
+  }
+  100% {
+    background: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .item.flash {
+    animation: none;
+    background: var(--mark-bg);
+  }
 }
 
 .time {

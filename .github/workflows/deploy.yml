@@ -70,8 +70,10 @@ jobs:
           key: mvnw-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
           restore-keys: mvnw-${{ runner.os }}-
 
-      # 不跑测试：这个仓库目前没有能挡住的测试用例，
-      # 让 CI 卡在形式上没意义的绿灯上只会让人习惯性忽略红灯。
+      # 这里跳过测试，不是因为没测试（仓库里有 185 条，`ci.yml` 逐条跑过），
+      # 而是因为同一个 commit 的测试已经由 ci.yml 判过了：部署再跑一遍只是把
+      # 上线时间翻倍，挡不住任何 ci 挡不住的东西。真要拦，就拦在 ci 那一关。
+      # 反过来说，千万别把 ci.yml 里的测试去掉 —— 那之后这里就是最后一道门。
       # 用 ./mvnw：Maven 版本锁在仓库里，和本地、云效跑的是同一个版本。
       - name: 打包
         run: ./mvnw -B -DskipTests package

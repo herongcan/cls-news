@@ -126,3 +126,94 @@ CREATE TABLE IF NOT EXISTS auth_token (
 
 CREATE INDEX IF NOT EXISTS idx_token_session ON auth_token (session);
 CREATE INDEX IF NOT EXISTS idx_token_expires ON auth_token (expires_at);
+
+-- ============ Agent 层（设计见 docs/agent-plan.md §5） ============
+-- 一次"用户点了一下按钮"就是一行。这里的核心不是存结果，而是**存钱花在哪了**：
+-- 谁触发的、基于哪些数据、用了哪个模板、策略是 full 还是 delta、花了多少 token。
+-- 没有这张表，Agent 出问题只能靠猜 —— 而 Agent 的失败形态从来不是报错，
+-- 是"悄悄换了个检索范围，然后给了一个看着挺像的答案"。
+
+CREATE TABLE IF NOT EXISTS agent_run (
+    id            TEXT PRIMARY KEY,       -- r_20261127T162012_a3f9：可排序、可读、可贴群里
+    kind          TEXT NOT NULL,          -- template | research | followup
+    template_id   TEXT,                   -- hot-today / nvda-bullish / a-share-drop
+    params_json   TEXT,                   -- {window:'1d', keywords:[], question:'...'}
+    thread_id     TEXT,                   -- Step 3 会话记忆预留（现在建好，省一次 SQLite 重建表）
+    parent_run_id TEXT,                   -- 追问链
+    trigger       TEXT NOT NULL,          -- 只允许 'user'：见 AgentService 的首行校验
+    trigger_by    TEXT NOT NULL,          -- 具体账号，审计用
+    window_key    TEXT NOT NULL,          -- '2026-11-27'，跨天判定（跨天必 full，不能吃昨天缓存）
+    strategy      TEXT NOT NULL,          -- full | delta
+    base_run_id   TEXT,                   -- delta 所基于的那次 full；full 时为 NULL
+    watermark     INTEGER NOT NULL,       -- 生成时候选集的 max(news.id)，缓存命中就看它
+    status        TEXT NOT NULL,          -- running | succeeded | failed | rejected
+    answer_json   TEXT,                   -- {title, bullets[], insufficient}
+    citations_json TEXT,                  -- 校验通过的 id（与工具真实返回求交后的结果）
+    candidates    INTEGER,                -- 送进模型的条数
+    tokens_in     INTEGER NOT NULL DEFAULT 0,
+    tokens_out    INTEGER NOT NULL DEFAULT 0,
+    model         TEXT,
+    latency_ms    INTEGER,
+    error         TEXT,
+    created_at    INTEGER NOT NULL,
+    finished_at   INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_created ON agent_run (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_brief   ON agent_run (kind, template_id, watermark);
+-- 找"今天最近一次 full"是 delta 判定的第一步，单独建索引
+CREATE INDEX IF NOT EXISTS idx_run_base    ON agent_run (template_id, window_key, strategy, status, created_at DESC);
+
+-- 同一缓存键在"正在跑"和"已成功"两种状态下都只允许一行。
+-- 这不是性能索引，是**防重复扣费的保险**：两个请求同时通过应用层检查时，
+-- 第二个在 INSERT 那一刻就被数据库拒绝，一分钱不花 —— 只挡 succeeded 是不够的，
+-- 那样两个请求都能插 running、都能调模型、都花钱，只有后写的撞索引作废（钱已经花出去了）。
+--
+-- 键从 (template_id, watermark) 扩到四列，每加一列都对应一个实测出来的漏洞：
+--   window_key  —— 跨天但采集没进新数据时 watermark 与昨天相同，旧索引会让今天的
+--                  full 写不进去（UPDATE 抛唯一冲突 → 返回 500）。缓存本来就不该跨天。
+--   params_json —— 同一模板带不同关键词是两次不同的检索，不该共用一条缓存。
+--                  不带这一列时，一次带自定义关键词的 run 会把该水位线的缓存占住，
+--                  后续用模板默认关键词的请求会拿到别人的答案。
+--
+-- 迁移顺序：先把历史上"同键多条 running"收敛成一条，再建索引（否则建索引会失败），
+-- 最后删旧索引。CREATE INDEX IF NOT EXISTS 对已存在的同名索引一个字都不会改，
+-- 所以改名而不是原地改 —— 否则老库永远升不上来。
+UPDATE agent_run
+   SET status = 'failed',
+       error = '迁移：同缓存键存在多条 running，保留最新一条',
+       finished_at = strftime('%s','now')
+ WHERE status = 'running' AND kind = 'template'
+   AND EXISTS (
+       SELECT 1 FROM agent_run b
+        WHERE b.status = 'running' AND b.kind = 'template'
+          AND b.template_id = agent_run.template_id
+          AND b.window_key  = agent_run.window_key
+          AND b.watermark   = agent_run.watermark
+          AND IFNULL(b.params_json,'') = IFNULL(agent_run.params_json,'')
+          AND (b.created_at > agent_run.created_at
+               OR (b.created_at = agent_run.created_at AND b.id > agent_run.id)));
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_brief_active
+    ON agent_run (template_id, window_key, watermark, params_json)
+    WHERE status IN ('running', 'succeeded') AND kind = 'template';
+
+DROP INDEX IF EXISTS uq_brief_key;
+DROP INDEX IF EXISTS uq_brief_watermark;
+
+-- 一次 run 内部的每一步（Step 1 只有 llm 和 guard 两种，Step 2 才多出 tool）。
+-- raw_output 截断存 ≤4KB：完整版动辄几十 KB，磁盘只有 40G；
+-- 更要紧的是存完整版会和"模型实际看到的截断版"不一致，排查时反而误导。
+CREATE TABLE IF NOT EXISTS agent_step (
+    run_id       TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    kind         TEXT NOT NULL,           -- llm | guard | error | tool（Step 2）
+    prompt_chars INTEGER,
+    raw_output   TEXT,
+    tokens_in    INTEGER,
+    tokens_out   INTEGER,
+    latency_ms   INTEGER,
+    error        TEXT,
+    ts           INTEGER NOT NULL,
+    PRIMARY KEY (run_id, seq)
+);

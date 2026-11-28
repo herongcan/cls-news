@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onAppHide, onAppShow, onPullDownRefresh, onReachBottom } from '@dcloudio/uni-app'
 import NewsItem from '@/components/NewsItem.vue'
+import AgentSheet from '@/components/AgentSheet.vue'
 import { useNewsFeed } from '@/composables/useNewsFeed'
 import { useAuth } from '@/stores/auth'
 import { useTheme } from '@/stores/theme'
@@ -45,6 +46,17 @@ const reForm = ref({ u: '', p: '' })
 const reErr = ref('')
 const reBusy = ref(false)
 let debounce: ReturnType<typeof setTimeout> | null = null
+
+/** 主线浮层的开关。浮层自己管加载，这里只管弹不弹 */
+const sheetOpen = ref(false)
+/**
+ * 从浮层点引用跳过来的那一条的 id。
+ *
+ * <p>用"短暂高亮 + 自动消失"而不是长期标记：列表是持续增量的，一条一直发光的行
+ * 在 30 秒后会被当成"未读"，而它只是你刚才点过的引用。
+ */
+const highlightId = ref(0)
+let highlightTimer: ReturnType<typeof setTimeout> | null = null
 
 const stats = computed(() => auth.stats)
 
@@ -103,6 +115,12 @@ onMounted(async () => {
   }
   if (auth.logged) {
     pingVisit()
+    // 直达链接：把 /#brief 发给同事，打开就是今日主线，不用先找右下角那个入口。
+    // 单向的（关掉浮层不改 hash）：双向改 hash 会在每次开关都往历史里塞一条，
+    // 手机上「返回」变成关浮层，而不是退出页面。
+    // #ifdef H5
+    if (location.hash === '#brief') sheetOpen.value = true
+    // #endif
     await reload()
     startPolling()
   }
@@ -130,6 +148,7 @@ onAppShow(() => setVisible(true))
 onUnmounted(() => {
   stopPolling()
   if (debounce) clearTimeout(debounce)
+  if (highlightTimer) clearTimeout(highlightTimer)
 })
 
 onReachBottom(() => {
@@ -247,6 +266,29 @@ function onMoreTap(): void {
   if (state.value === 'idle') void loadMore()
 }
 
+/**
+ * 从主线浮层点某条引用：滚到那一条并高亮。
+ *
+ * <p>引用是 id，不是下标 —— 列表 30 秒会自动插新条目，用下标存位置一定会错位。
+ *
+ * <p>不在当前页时不假装找得到：列表只加载了最近几十条，一条 8 小时前的新闻
+ * 根本不在 DOM 里，滚不过去。这时给出准确的话（去搜标题），比滚到错误的位置强。
+ */
+function jumpToNews(id: number): void {
+  sheetOpen.value = false
+  if (!items.value.some((x) => x.id === id)) {
+    notice.value = '第 ' + id + ' 条不在当前列表，可在上方搜索标题找到它'
+    return
+  }
+  highlightId.value = id
+  if (highlightTimer) clearTimeout(highlightTimer)
+  highlightTimer = setTimeout(() => (highlightId.value = 0), 2600)
+
+  // 用 selector 而不是自己算 rect：页面的滚动容器在 H5 与小程序上不是同一个东西，
+  // 手算 top 的方式换端就错。offsetTop 留出 96px 给吸顶栏，否则标题会被盖住。
+  uni.pageScrollTo({ selector: '#news-' + id, offsetTop: 96, duration: 240 })
+}
+
 function dismissNotice(): void {
   notice.value = ''
 }
@@ -339,18 +381,27 @@ function dismissNotice(): void {
       <view v-if="notice" class="notice" @tap="dismissNotice">{{ notice }}</view>
 
       <view class="list">
-        <NewsItem
-          v-for="n in items"
-          :key="n.id"
-          :item="n"
-          :keyword="keyword"
-          :can-analyze="auth.canAnalyze"
-          :analyzing="isAnalyzing(n.id)"
-          @analyze="analyze(n.id)"
-        />
+        <view v-for="n in items" :id="'news-' + n.id" :key="n.id">
+          <NewsItem
+            :item="n"
+            :keyword="keyword"
+            :can-analyze="auth.canAnalyze"
+            :analyzing="isAnalyzing(n.id)"
+            :highlight="highlightId === n.id"
+            @analyze="analyze(n.id)"
+          />
+        </view>
       </view>
 
       <view class="more" :class="state" @tap="onMoreTap">{{ moreText }}</view>
+
+      <!-- 主线入口。浮层打开时只打免费报价，点了才花 token -->
+      <view class="fab" @tap="sheetOpen = true">
+        <text class="fab-dot" />
+        <text>今日主线</text>
+      </view>
+
+      <AgentSheet :open="sheetOpen" :can-run="auth.canAnalyze" @close="sheetOpen = false" @pick="jumpToNews" />
 
       <!--
         会话中途失效的浮层。
@@ -386,7 +437,8 @@ function dismissNotice(): void {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  padding-bottom: 40px;
+  /* 底部留出悬浮入口的高度，否则「已经到底了」会被按钮盖掉半行 */
+  padding-bottom: 78px;
 }
 
 .boot {
@@ -641,6 +693,33 @@ function dismissNotice(): void {
   text-decoration: underline;
   text-underline-offset: 4px;
   cursor: pointer;
+}
+
+/* ---------- 主线入口 ---------- */
+/* 悬浮而不是放进顶栏：顶栏那两行已经排满（账号 / 数据），再塞一个入口会把
+   「退出」挤到第三行 —— 那个坑以前踩过（见 hd 上的注释）。 */
+.fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel);
+  border: 0.5px solid var(--line-2);
+  border-radius: 20px;
+  padding: 8px 14px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+}
+.fab-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--amber);
 }
 
 /* ---------- 登录层 ---------- */

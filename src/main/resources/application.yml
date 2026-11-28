@@ -61,6 +61,41 @@ app:
     temperature: 0.2
     max-tokens: 2000
 
+  # 「今日主线」这类批量分析任务。与上面的 analysis 分开：
+  # 那边防的是"一条条点太多次"，这里防的是"一次点下去烧掉一万 token"。
+  agent:
+    enabled: ${APP_AGENT:true}
+    # 每天最多成功生成几次。数的是 agent_run 里 succeeded 的行数 ——
+    # 失败、拒答、缓存命中都不产生新的 succeeded 行，所以天然不扣次数。
+    daily-cap: ${APP_AGENT_DAILY_CAP:100}
+    # 游客额度。主线单价约为单条分析的 20 倍，所以比 guest-daily-cap（10）保守
+    guest-daily-cap: ${APP_AGENT_GUEST_CAP:5}
+    # 输入硬闸。实测：241 条 1.45 万 token、600 条造数 2.6 万，给到 3 万留余量。
+    # 超了先降级（L1 尾部变只给标题），仍超才丢最低分
+    max-tokens-in: 30000
+    # 输出上限。注意：deepseek-flash 是推理模型，max_tokens 会被思考过程吃掉大部分。
+    # 实测（138 条 / 1.1 万输入）：给 1200 和 3000 都截断且正文一字未出，给 8000 成功
+    # （实际只用 1561，其中正文约 400、推理约 1100）。思考长度不稳定，上限要留足余量。
+    # 这是上限不是预扣，给 8000 不会直接多花钱 —— 失败一次才是真花钱
+    max-tokens-out: 8000
+    # 比单条分析长一倍：一万 token 的 prefill 本身就要 2–4 秒，
+    # 用 30 秒会把正常的慢请求判成失败，而失败一次就是白花一万 token
+    timeout-ms: 60000
+    # running 行多久算僵尸（秒）。必须明显大于 timeout-ms，否则"还在跑"会被误判成"死了"被抢走
+    # 真实场景：容器在生成途中被 kill，running 行留在库里，不清理就永久锁死这个水位线
+    stale-seconds: ${APP_AGENT_STALE_SECONDS:180}
+    # 发现别的实例正在生成时最多等多久。等一等比 503 好，但别占着线程无限等
+    busy-wait-ms: ${APP_AGENT_BUSY_WAIT_MS:15000}
+    temperature: 0.2
+    # 以下三项留空即继承上面 analysis 的同名配置：
+    # 同一家供应商没必要配两遍，换中转站时也少一个"改了这处忘了那处"的机会
+    model: ""
+    base-url: ""
+    # 已废弃：key 全站只有一份（LlmKey 启动时解析一次），两处共用。
+    # 这里配了仍然生效并打 WARN，换 key 请改 analysis.api-key —— 两边各配一份时
+    # 会出现「分析能用、主线 401」这种两处代码看起来都对的问题
+    api-key: ""
+
   http:
     timeout-ms: 12000
     user-agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"

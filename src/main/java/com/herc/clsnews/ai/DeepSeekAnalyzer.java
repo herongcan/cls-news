@@ -16,8 +16,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -76,7 +74,7 @@ public class DeepSeekAnalyzer implements Analyzer {
     private final AtomicLong tokensIn = new AtomicLong();
     private final AtomicLong tokensOut = new AtomicLong();
 
-    public DeepSeekAnalyzer(AppProps props, ObjectMapper mapper) {
+    public DeepSeekAnalyzer(AppProps props, ObjectMapper mapper, LlmKey llmKey) {
         this.props = props;
         this.mapper = mapper;
         this.prompt = PromptTemplate.load(PROMPT_RESOURCE);
@@ -90,23 +88,22 @@ public class DeepSeekAnalyzer implements Analyzer {
         // 这是部署时最容易犯的错（.env 忘了填、填错、挂卷没生效），如果让它把关整个 context，
         // 结果是容器反复重启、连新闻都看不了 —— 而采集才是这个工具的本体，分析只是增强。
         // 快速失败在这里是错的：一行日志比一个起不来的服务有用得多。
-        String key = null;
-        String from = "未配置";
-        try {
-            Resolved r = resolveKey(cfg);
-            key = r.value();
-            from = r.source();
-        } catch (IllegalStateException e) {
-            log.error("分析功能不可用（采集不受影响）：{}", e.getMessage().lines().findFirst().orElse(""));
-        }
+        //
+        // key 不在本类解析：LlmKey 启动时已经解析过一次，和「今日主线」拿到的是同一个结果。
+        // 各解析一次的老写法会让"只配了 agent 那份"变成"主线好、分析没 key"，而两处代码看起来都对。
+        LlmCredential.Resolved resolved = llmKey.forBaseUrl(cfg.getBaseUrl());
+        String key = resolved == null ? null : resolved.value();
+        this.keySource = resolved == null ? "未配置" : resolved.source();
         this.apiKey = key;
-        this.keySource = from;
 
         if (key == null) {
-            log.error("DeepSeekAnalyzer 已创建但无 key，所有分析会直接失败。补齐 key 后重启即可。");
+            // 不再重复 LlmCredential.hint()：LlmKey 启动时已经打过一次三选一，
+            // 两处都打只会让日志看起来像两个独立的故障
+            log.error("单条分析不可用（采集照常）：base-url={} 没有可用的 key，来源见上面「模型 key」那行",
+                    cfg.getBaseUrl());
         } else {
             log.info("DeepSeekAnalyzer 就绪：model={} baseUrl={} key={}…（来自 {}）",
-                    cfg.getModel(), cfg.getBaseUrl(), mask(key), from);
+                    cfg.getModel(), cfg.getBaseUrl(), LlmCredential.mask(key), keySource);
         }
     }
 
@@ -429,46 +426,6 @@ public class DeepSeekAnalyzer implements Analyzer {
     @Override
     public String usage() {
         return "calls=" + calls.get() + " tokens=" + (tokensIn.get() + tokensOut.get());
-    }
-
-    private record Resolved(String value, String source) {
-    }
-
-    private Resolved resolveKey(AppProps.Analysis cfg) {
-        String fromCfg = cfg.getApiKey();
-        if (fromCfg != null && !fromCfg.isBlank()) {
-            return new Resolved(fromCfg.trim(), "application.yml");
-        }
-        String env = System.getenv("DEEPSEEK_API_KEY");
-        if (env != null && !env.isBlank()) {
-            return new Resolved(env.trim(), "环境变量 DEEPSEEK_API_KEY");
-        }
-        if (cfg.getBaseUrl() != null && cfg.getBaseUrl().contains("deepseek")) {
-            Path auth = Path.of(System.getProperty("user.home"), ".codex", "auth.json");
-            if (Files.isReadable(auth)) {
-                try {
-                    JsonNode n = mapper.readTree(Files.readString(auth));
-                    String k = n.path("OPENAI_API_KEY").asText("");
-                    if (k.startsWith("sk-")) {
-                        return new Resolved(k.trim(), auth.toString());
-                    }
-                } catch (Exception e) {
-                    log.warn("读取 {} 失败：{}", auth, e.getMessage());
-                }
-            }
-        }
-        throw new IllegalStateException("""
-                没有找到 DeepSeek key。三选一：
-                  1) 启动时加 --app.analysis.api-key=sk-xxx
-                  2) export DEEPSEEK_API_KEY=sk-xxx
-                  3) 保证 ~/.codex/auth.json 里有 OPENAI_API_KEY""");
-    }
-
-    private static String mask(String key) {
-        if (key == null || key.length() < 12) {
-            return "***";
-        }
-        return key.substring(0, 6) + "…" + key.substring(key.length() - 4);
     }
 
     private static String trimSlash(String s) {

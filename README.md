@@ -338,7 +338,7 @@ curl -s -X POST -u 1:1 localhost:8080/api/auth/token    # 期望 401
 | `app.analysis.auto` | `false` | `false` = 只有点「分析」才调模型；`true` = 抓进来就排队自动分析。**默认手动**：日增 400+ 条，全自动等于把没人在意的一半也送去模型，而且队列从旧往新跑，首屏最新的反而最后才分析 |
 | `app.analysis.provider` | `deepseek` | `deepseek` 真实调用 / `stub` 空实现 |
 | `app.analysis.daily-cap` | `300` | 每日分析调用上限，防误触烧钱；超限返回 429 而不是静默跳过 |
-| `app.analysis.api-key` | 空 | 留空则回落到环境变量 / `~/.codex/auth.json` |
+| `app.analysis.api-key` | 空 | **全站唯一的那把模型 key**，单条分析与今日主线共用（`LlmKey` 启动时解析一次）。留空则回落到环境变量 / `~/.codex/auth.json` |
 | `app.analysis.model` | `deepseek-flash` | 实测可用：`deepseek-flash`、`deepseek-v4-pro` |
 | `app.analysis.max-tokens` | `2000` | **别调小**：推理型模型的思考过程也算在内，600 会让 JSON 被截断 |
 | `app.analysis.timeout-ms` | `30000` | 单次模型调用硬超时（`sendAsync` + `get(timeout)`，不是靠 HTTP 超时） |
@@ -368,6 +368,10 @@ curl -s -X POST -u 1:1 localhost:8080/api/auth/token    # 期望 401
 1. `--app.analysis.api-key=sk-xxx`（优先级最高，临时换 key 用）
 2. 环境变量 `DEEPSEEK_API_KEY`
 3. `~/.codex/auth.json` 里的 `OPENAI_API_KEY`（仅当 `base-url` 指向 deepseek 时才读，避免把别家的 key 发出去）
+
+**只有这一把 key**：单条分析和「今日主线」共用同一份解析结果（`LlmKey`，启动时解析一次）。
+`app.agent.api-key` 已废弃，配了仍生效但会打 WARN —— 两个字段各配一把时，会出现
+「分析能用、主线 401」这种两处代码看起来都对的问题，所以不允许分叉。
 
 **提示词不在代码里**：直接改 `src/main/resources/prompts/analyze-news.md` 的 `## System` / `## User` 两段，重启生效，不用重新编译。占位符 `{{publishTime}}` `{{level}}` `{{stocks}}` `{{content}}`。
 
@@ -531,7 +535,7 @@ ssh-copy-id -i ~/.ssh/cls-news-deploy.pub root@8.136.19.57
 
 ### 运行一次会看到什么
 
-1. `./mvnw -B package`（含 47 个单元测试；首次约 2 分钟，有 Maven 缓存后 40 秒左右）
+1. `./mvnw -B package`（含 210 个单元测试；首次约 2 分钟，有 Maven 缓存后 40 秒左右）
 2. 校验 `target/cls-news-0.1.0.jar` 是 Spring Boot fat jar（否则服务器上会报
    `no main manifest attribute`，得翻半天日志）
 3. `ssh-keyscan` 写 `known_hosts`（不用 `StrictHostKeyChecking=no`，那个等于关掉中间人防护）

@@ -97,12 +97,17 @@ public class BasicAuthFilter extends OncePerRequestFilter {
     private static final Set<String> READ_ONLY_DENY = Set.of("/api/visits/logs");
 
     /**
-     * 游客账号不给看的路径：整个访客模块。
+     * 游客账号不给看的路径：整个访客模块，以及主线体检。
      *
      * <p>比只读账号更严 —— 连聚合数字都不给。演示的用途是看「这条新闻模型怎么判」，
      * 而「今天有多少人在用、累计多少访客」是站主的运营数据，跟演示无关。
+     *
+     * <p>{@code /api/agent/health} 同理：它报的是全站 token 消耗、key 有没有配、
+     * 有没有僵死的 running 行。这些是运维视角，演示账号看了既帮不上忙，
+     * 又把"这个站一天花多少钱"摊给了外人。
      */
-    private static final Set<String> GUEST_DENY = Set.of("/api/visits", "/api/visits/logs");
+    private static final Set<String> GUEST_DENY =
+            Set.of("/api/visits", "/api/visits/logs", "/api/agent/health");
 
     /**
      * 只读账号唯一允许的非 GET 请求。
@@ -113,12 +118,26 @@ public class BasicAuthFilter extends OncePerRequestFilter {
     private static final Set<String> READ_ONLY_POST = Set.of("/api/visit/ping");
 
     /**
-     * 游客账号唯一允许的写路径：单条分析。
+     * 游客账号唯一允许的写路径：单条分析，以及主线生成。
      *
      * <p>用正则而不是 {@code startsWith}：{@code /api/news/1/analyze/../x} 这类拼接
      * 在不同的容器/版本上规范化时机不一致，就不给它留判断空间。
      */
     private static final Pattern ANALYZE_PATH = Pattern.compile("^/api/news/\\d+/analyze$");
+
+    /**
+     * 游客唯一允许的写接口。
+     *
+     * <p>{@code /api/agent/ask} 是主线生成，单价约为单条分析的 20 倍。放行它的理由不是
+     * "游客也该花钱"，而是 {@code app.agent.guest-daily-cap}（默认 5）本来就是为这件事配的：
+     * 额度在 {@code AgentService.checkQuota} 里按 actor 扣，真正的钱闸在那里。
+     * 白名单这边只回答"这个角色能不能碰这条路径"——不许的话那个配置项就永远不生效，
+     * 界面上却是"游客也有主线"，两边对不上。
+     *
+     * <p>只读账号（{@code ro}）**不在**这里：它的定义就是不产生花费。
+     * 它仍然能读 {@code precheck} 与 {@code runs}，看得到已有结论。
+     */
+    private static final Set<String> GUEST_POST = Set.of("/api/visit/ping", "/api/agent/ask");
 
     /** 前端构建产物，浏览器加载时不会带任何凭证头。 */
     private static final String ASSET_PREFIX = "/assets/";
@@ -276,7 +295,7 @@ public class BasicAuthFilter extends OncePerRequestFilter {
         String m = req.getMethod();
         if ("GET".equals(m) || "HEAD".equals(m) || "OPTIONS".equals(m)) return true;
         if (!"POST".equals(m)) return false;
-        if (READ_ONLY_POST.contains(uri)) return true;
+        if (GUEST_POST.contains(uri)) return true;
         if (ANALYZE_PATH.matcher(uri).matches()) {
             return !"true".equalsIgnoreCase(req.getParameter("force"));
         }

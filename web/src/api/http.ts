@@ -20,10 +20,20 @@ export class ApiError extends Error {
   /** 0 = 网络层失败（断网、超时、域名没进白名单），其余是 HTTP 状态码 */
   status: number
 
-  constructor(message: string, status = 0) {
+  /**
+   * 后端的机器可读错误码（body.code），拿不到时为空串。
+   *
+   * 为什么不能只看 status：同一个 400 既可能是「这条不该分析」（PROMO_ITEM，
+   * 不该把按钮改成"重试"），也可能是以后新增的参数错误。状态码分不出来，
+   * 文案又会被改，只有 code 是稳定契约。
+   */
+  code: string
+
+  constructor(message: string, status = 0, code = '') {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
   }
 }
 
@@ -70,6 +80,15 @@ function pickMessage(data: unknown, status: number): string {
   return '请求失败（HTTP ' + status + '）'
 }
 
+/** 取后端的机器可读错误码；没有就返回空串，调用方按"未知错误"处理。 */
+function pickCode(data: unknown): string {
+  if (data && typeof data === 'object') {
+    const v = (data as Record<string, unknown>).code
+    if (typeof v === 'string' && v.trim()) return v.trim()
+  }
+  return ''
+}
+
 interface RequestInit {
   method?: 'GET' | 'POST'
   query?: Query
@@ -112,7 +131,7 @@ function send<T>(path: string, init: RequestInit): Promise<T> {
         if (status >= 200 && status < 300) {
           resolve(res.data as T)
         } else {
-          reject(new ApiError(pickMessage(res.data, status), status))
+          reject(new ApiError(pickMessage(res.data, status), status, pickCode(res.data)))
         }
       },
       fail: (err) => {

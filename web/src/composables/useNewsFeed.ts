@@ -60,7 +60,18 @@ export function useNewsFeed() {
   /** 增量请求是否在飞（见 pullNewer 里的说明） */
   let pulling = false
 
-  const cursor = computed(() => (items.value.length ? items.value[items.value.length - 1].id : 0))
+  /**
+   * 翻页游标，必须是**独立状态**，不能从列表末尾推导。
+   *
+   * <p>从末尾推导时，任何「往列表里插一条不属于这一页的新闻」都会把游标一起带偏：
+   * 点引用跳转要把正文补进列表（见 reveal），补的往往是几小时前那条，
+   * id 比当前末尾还小，游标跟着变小之后，`before=` 会从更旧的位置重新拉，
+   * 中间那一段就永远加载不到了。
+   *
+   * <p>只在 reload / loadMore 真正交付后推进：游标记录的是「已经连续拿到哪里」，
+   * 不是「列表里最小的 id」。
+   */
+  const cursor = ref(0)
 
   const state = computed<FeedState>(() => {
     if (loading.value) return 'loading'
@@ -95,6 +106,8 @@ export function useNewsFeed() {
       if (my !== requestSeq) return
       items.value = page.items
       hasMore.value = page.hasMore
+      // 换了一整页，游标跟着换：这里允许回退，因为列表已经被整体替换
+      cursor.value = page.items.length ? page.items[page.items.length - 1].id : 0
       // 只有信息流才推进增量游标。搜索结果是另一条时间线，拿它推进会让
       // 「搜索期间到达的新条目」在退出搜索后被当成已看过 —— 那正是另一条丢条路径。
       if (!keyword.value) {
@@ -128,6 +141,8 @@ export function useNewsFeed() {
       const seen = new Set(items.value.map((x) => x.id))
       items.value = items.value.concat(page.items.filter((x) => !seen.has(x.id)))
       hasMore.value = page.hasMore
+      // 只前进：插进来的条目（reveal）不进这个数，游标只认连续交付到哪
+      if (page.items.length) cursor.value = page.items[page.items.length - 1].id
     } catch (e) {
       if (my !== requestSeq) return
       error.value = e instanceof ApiError ? e.message : '加载失败'
@@ -139,6 +154,36 @@ export function useNewsFeed() {
   async function search(kw: string): Promise<void> {
     keyword.value = kw.trim()
     await reload()
+  }
+
+  /**
+   * 让某一条出现在列表里：已在就直接用，不在就单独补进来。
+   *
+   * <p>为什么不是「翻页找到它」：引用可能指向八小时前的一条，按游标翻页要找十几次，
+   * 每次都是一整个网络往返；按 id 取一条只要一次。
+   *
+   * <p>补进来的这条**不参与游标**（见 cursor 的注释），否则点一次引用
+   * 就等于把翻页位置往回退了一屏，中间那批新闻会静默丢掉。
+   */
+  async function reveal(id: number): Promise<'here' | 'added' | 'missing'> {
+    // 搜索状态下列表只剩命中项。引用的语义是「这条在信息流里的位置」，
+    // 所以先退出搜索再定位；留在搜索里补一条不匹配关键词的条目，看起来像搜错了。
+    if (keyword.value) {
+      keyword.value = ''
+      await reload()
+    }
+    if (items.value.some((x) => x.id === id)) return 'here'
+    try {
+      const item = await fetchOne(id)
+      // 按 id 降序插到正确位置。直接 push 会让它排到最旧那条之后，
+      // 上下文全错 —— 用户会以为「这条是刚发的」。
+      const at = items.value.findIndex((x) => x.id < item.id)
+      if (at < 0) items.value = items.value.concat(item)
+      else items.value = [...items.value.slice(0, at), item, ...items.value.slice(at)]
+      return 'added'
+    } catch {
+      return 'missing'
+    }
   }
 
   /**
@@ -234,6 +279,18 @@ export function useNewsFeed() {
   async function analyze(id: number): Promise<void> {
     if (isAnalyzing(id)) return
     notice.value = ''
+
+    // 栏目导流（标题以【开头）正文是荐股话术，判它必然得出「利好某某板块」，纯属白花钱。
+    // 这里先判一次是为了**不发这个请求**：省一次往返，也不会让按钮闪一下「分析中」。
+    // 判据与后端 NewsClass.isPromo 是同一套，改一处必须同步另一处。
+    // 后端那道拦截不能省 —— 它才是真正挡住钱的，这里只是体验优化。
+    const known = items.value.find((x) => x.id === id)
+    const lead = known?.title || known?.text || ''
+    if (lead.startsWith('【')) {
+      notice.value = '该条是栏目导流（【…】开头），没有可分析的信息，建议直接看原文'
+      return
+    }
+
     analyzing.value = [...analyzing.value, id]
     // 乐观置为 analyzing：按钮立刻变「分析中」，否则点了没反应人会怀疑没点上
     patch(id, { analysisStatus: 'analyzing' })
@@ -245,7 +302,10 @@ export function useNewsFeed() {
       const auth = useAuth()
       if (auth.logged) void auth.sync().catch(() => undefined)
     } catch (e) {
-      patch(id, { analysisStatus: 'failed' })
+      // 400 是「这个请求本来就不该发」，不是失败：按钮要回到「分析」而不是变成「重试分析」，
+      // 后者会让用户以为再点一次就能成，于是反复点、反复被拒。
+      const rejected = e instanceof ApiError && e.status === 400
+      patch(id, { analysisStatus: rejected ? 'pending' : 'failed' })
       notice.value = e instanceof ApiError ? e.message : '分析失败'
     } finally {
       analyzing.value = analyzing.value.filter((x) => x !== id)
@@ -285,6 +345,7 @@ export function useNewsFeed() {
     reload,
     loadMore,
     search,
+    reveal,
     analyze,
     isAnalyzing,
     pullNewer,

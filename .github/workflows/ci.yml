@@ -9,8 +9,9 @@ name: ci
 # /index.html，浏览器加载 <script src="/assets/..."> 时不带 Authorization 头，全部 401。
 # 旧页面把 CSS/JS 内联在 HTML 里，这个洞潜伏了很久。下面那组断言就是防止它再回来。
 #
-# 不跑测试：仓库里没有能挡住问题的用例，让门禁卡在形式上的绿灯只会让人习惯性忽略红灯。
-# 真正能挡的是「起真进程 + 打真接口」这几条，所以冒烟用 java -jar 起真实例。
+# 不跑测试这件事已经改掉了：仓库里现在有 185 条用例，`mvn package` 会连测试一起跑，
+# 跳过它们（-DskipTests）就意味着状态机、缓存键、配额、并发这些最危险的回归全部无人看守。
+# 真正能挡的还是「起真进程 + 打真接口」这几条，所以冒烟用 java -jar 起真实例。
 
 on:
   pull_request:
@@ -115,7 +116,7 @@ jobs:
           restore-keys: mvnw-${{ runner.os }}-
 
       # 单元测试与打包一起跑。`mvn package` 默认就会执行 test 阶段，
-      # 所以这一条既是老行为（出 jar）又是新门禁（47 个回归用例）——
+      # 所以这一条既是老行为（出 jar）又是新门禁（185 个回归用例）——
       # 千万别再顺手加上 -DskipTests：跳过之后这个 job 依然是绿的，
       # 而状态机、游标、配额这些最危险的回归一条都拦不住。
       - name: 单元测试 + 打包
@@ -315,6 +316,27 @@ jobs:
           assert 200 '重启后旧 access 仍有效'            -H "Authorization: Bearer $A4" "$BASE/api/status"
           assert 200 '重启后旧 refresh 仍可换'           -X POST -H 'Content-Type: application/json' \
                  -d "{\"refreshToken\":\"$R4\"}" "$BASE/api/auth/refresh"
+
+          echo "--- 主线体检 ---"
+          # 这个实例没配 api-key，主线一定不可用。所以这段断言的不是"健康"，
+          # 而是**两个端点必须给出不同结论**：/healthz 只看进程活没活，体检看功能能不能用。
+          # 有人把体检做成 /healthz 的别名时，这两条会当场红。
+          assert 401 '无凭证 /api/agent/health'        "$BASE/api/agent/health"
+          assert 403 'guest /api/agent/health'         -H "Authorization: Bearer $G0" "$BASE/api/agent/health"
+          HEALTH=$(curl -s -H "Authorization: Bearer $A4" "$BASE/api/agent/health")
+          H_STATUS=$(echo "$HEALTH" | jq -r '.status')
+          H_TEMPLATES=$(echo "$HEALTH" | jq -r '.templates.count')
+          Z_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$BASE/healthz")
+          [ "$Z_CODE" = "200" ] || { echo "::error::/healthz 应为 200，实际 $Z_CODE"; fail=1; }
+          [ "$H_STATUS" = "DEGRADED" ] || {
+            echo "::error::没配 key 的实例，主线体检应为 DEGRADED，实际 $H_STATUS"; fail=1; }
+          [ "$H_TEMPLATES" = "3" ] || {
+            echo "::error::模板应加载到 3 个，实际 $H_TEMPLATES：$(echo "$HEALTH" | jq -c '.templates')"; fail=1; }
+          # 体检是诊断，不是配置转储。key 出现在这里，就会跟着截图和工单一起流出去
+          if echo "$HEALTH" | grep -qi 'sk-'; then
+            echo "::error::/api/agent/health 回显了疑似 key"; fail=1
+          fi
+          echo "healthz=$Z_CODE 体检=$H_STATUS 模板数=$H_TEMPLATES"
 
           echo "--- 换令牌限流 ---"
           # 这一段必须放在最后：它会把 127.0.0.1 上的 admin 锁定 15 分钟，

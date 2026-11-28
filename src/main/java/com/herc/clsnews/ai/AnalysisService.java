@@ -133,11 +133,14 @@ public class AnalysisService {
      */
     public Outcome analyzeNews(long id, boolean force, String actor, Integer actorCap) {
         if (!enabled()) {
-            throw new AnalysisException(503, "DISABLED", "分析功能已关闭（app.analysis.enabled=false）");
+            throw new AnalysisException(503, "DISABLED", "分析功能已暂停");
         }
         if (!analyzer.ready()) {
-            throw new AnalysisException(503, "NOT_READY",
-                    "大模型未就绪，检查 DEEPSEEK_API_KEY 是否配置正确");
+            // 这句话会原样铺在页面上给同事看（前端把 503 的 message 当提示条），
+            // 所以不写 DEEPSEEK_API_KEY、app.analysis.enabled 这类运维词 —— 看到它们的人
+            // 既改不了配置也不知道该找谁。排障信息在启动日志（LlmKey 那两行）与
+            // /api/agent/health 的 problems 里，那里才是该看的地方；code=NOT_READY 留给脚本判断。
+            throw new AnalysisException(503, "NOT_READY", "分析功能暂不可用，稍后再试");
         }
 
         News before = store.findById(id)
@@ -146,10 +149,21 @@ public class AnalysisService {
         if (!force && isFresh(before)) {
             return new Outcome(before, true);
         }
+
+        // 栏目导流（【风口研报】【盘中宝】这类）正文是荐股话术，结论必然是"利好某某板块"，
+        // 分析它等于花钱买一句广告。位置很关键：
+        //   放在 isFresh 之后 —— 历史上已经分析过的照常返回缓存，不因为新规则把旧结果藏起来；
+        //   放在配额判断之前 —— 被拦的这条不扣次数，也不占别人的额度。
+        if (NewsClass.isPromo(before.title())) {
+            throw new AnalysisException(400, "PROMO_ITEM",
+                    "该条是栏目导流（【…】开头），正文没有可分析的信息，建议直接看原文");
+        }
+
         if (usedToday() >= dailyCap()) {
             // 必须明说，否则用户只会重复点，把次数白耗在上限判断上。
+            // 「调 app.analysis.daily-cap 可放宽」这句删了：看页面的人是同事，不是改配置的人
             throw new AnalysisException(429, "CAPPED",
-                    "今日分析已达上限 " + dailyCap() + " 条，明天再试（调整 app.analysis.daily-cap 可放宽）");
+                    "今日分析已达上限 " + dailyCap() + " 条，明天再试");
         }
         if (actorCap != null && usedToday(actor) >= actorCap) {
             // 文案要点明是哪个上限：游客看到「已达上限 300 条」会以为是系统坏了
@@ -174,7 +188,10 @@ public class AnalysisService {
         } catch (Exception e) {
             store.markFailed(id);
             log.warn("分析失败 id={}：{}", id, e.getMessage());
-            throw new AnalysisException(502, "MODEL_ERROR", String.valueOf(e.getMessage()));
+            // 原来把 e.getMessage() 原样回给前端，页面上就会出现 "Read timed out"、
+            // 上游 401 的 JSON 片段这类东西 —— 用户读不懂，也没法据此做任何事。
+            // 原始信息留在上面这行 warn 里（按 id 能查到是哪条），页面只给一句能理解的。
+            throw new AnalysisException(502, "MODEL_ERROR", "模型返回异常，稍后再试");
         }
     }
 

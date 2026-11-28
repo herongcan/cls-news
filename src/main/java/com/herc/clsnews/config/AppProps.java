@@ -18,6 +18,7 @@ public class AppProps {
 
     private final Display display = new Display();
     private final Analysis analysis = new Analysis();
+    private final Agent agent = new Agent();
     private final Http http = new Http();
     private final Security security = new Security();
 
@@ -32,8 +33,104 @@ public class AppProps {
 
     public Display getDisplay() { return display; }
     public Analysis getAnalysis() { return analysis; }
+    public Agent getAgent() { return agent; }
     public Http getHttp() { return http; }
     public Security getSecurity() { return security; }
+
+    /**
+     * 「今日主线」这类批量分析任务的参数。与 {@link Analysis} 分开，因为它们约束的东西不同：
+     * 单条分析防的是"一条条点太多"，主线防的是"一次点下去烧掉一万 token"。
+     *
+     * <p>供应商相关的三项（model / base-url / api-key）留空就继承 {@link Analysis} ——
+     * 同一家供应商没必要配两遍，换中转站时也不用记着改两处。
+     *
+     * <p>其中 <b>api-key 已废弃</b>：key 现在由 {@code LlmKey} 在启动时解析一次、全站共用，
+     * 两个消费方不可能一半有一半没有。这个字段只作迁移别名保留（见 {@code LlmKey} 的说明）。
+     */
+    public static class Agent {
+        /** 总开关。false 时所有 /api/agent/* 返回 503，不影响单条分析 */
+        private boolean enabled = true;
+        /**
+         * 每天最多生成几次主线，按「成功的 run 行数」计。
+         *
+         * <p>为什么可以比单条分析的额度小这么多：一次主线约 1 万 token，
+         * 相当于 20 次单条分析的花费。100 次/天是"随便点也不会失控"的量级。
+         */
+        private int dailyCap = 100;
+        /** 游客每天能生成几次。单价高，额度就要比 guest-daily-cap（10）保守 */
+        private int guestDailyCap = 5;
+        /** 输入 token 硬闸，覆盖 {@link com.herc.clsnews.agent.Packer#MAX_TOKENS_IN} */
+        private int maxTokensIn = 30_000;
+        /**
+         * 输出上限。<b>不是 3–5 条主线需要多少，而是推理模型会把额度花在思考上。</b>
+         *
+         * <p>实测（2026-11-27 真模型验收，138 条候选 / 1.1 万输入 token）：
+         * <ul>
+         *   <li>给 1200：{@code finish_reason=length}，额度全被推理吃掉，正文一字未出</li>
+         *   <li>给 3000：同样截断，这次花了 1.4 万 token</li>
+         *   <li>给 8000：成功，实际输出 1561（其中正文约 400，推理约 1100）</li>
+         * </ul>
+         * 同一输入两次的思考长度并不稳定（3000 就爆、1561 就够），所以上限要留足余量而不是卡着实际用量设。
+         * {@code max_tokens} 是上限不是预扣，给 8000 不会直接多花钱 —— 失败一次才是真花钱。
+         */
+        private int maxTokensOut = 8_000;
+        /** 比单条分析长：输入一万 token 的 prefill 本身就要几秒 */
+        private int timeoutMs = 60_000;
+        /**
+         * running 行多久算僵尸。
+         *
+         * <p>必须明显大于 {@link #timeoutMs}：进程还活着、只是模型慢，这行就不该被抢走。
+         * 给 180 秒 = 60 秒超时的三倍，覆盖"重试一次 + 落库"的余量。
+         *
+         * <p>真实需要它的场景：容器在生成途中被 kill（滚动更新、OOM），running 行留在库里。
+         * 启动时的 resetStuck 能清掉大部分，但清不掉"另一个实例还活着"的那种 —— 那是 BUSY，
+         * 不是僵尸，两者要靠时间戳区分。
+         */
+        private int staleSeconds = 180;
+        /**
+         * 发现别人正在生成时，最多等多久（毫秒）。
+         *
+         * <p>正常情况下同进程的并发已被 SingleFlight 合并，走到这里只可能是另一个实例在跑。
+         * 等一等比直接 503 好：用户想要的是结果，不是"再点一次"。
+         * 但也不能无限等 —— 占着 Tomcat 线程就是在耗资源。
+         */
+        private int busyWaitMs = 15_000;
+        private double temperature = 0.2;
+        /** 空 = 用 analysis.model */
+        private String model = "";
+        /** 空 = 用 analysis.base-url */
+        private String baseUrl = "";
+        /**
+         * <b>已废弃</b>，只作迁移别名：配了仍然生效（否则线上会突然说没 key），但会打 WARN。
+         * 换 key 请改 analysis.api-key —— key 全站只有一份，共用 {@code LlmKey} 的解析结果。
+         */
+        private String apiKey = "";
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getDailyCap() { return dailyCap; }
+        public void setDailyCap(int dailyCap) { this.dailyCap = dailyCap; }
+        public int getGuestDailyCap() { return guestDailyCap; }
+        public void setGuestDailyCap(int v) { this.guestDailyCap = v; }
+        public int getMaxTokensIn() { return maxTokensIn; }
+        public void setMaxTokensIn(int v) { this.maxTokensIn = v; }
+        public int getMaxTokensOut() { return maxTokensOut; }
+        public void setMaxTokensOut(int v) { this.maxTokensOut = v; }
+        public int getTimeoutMs() { return timeoutMs; }
+        public void setTimeoutMs(int v) { this.timeoutMs = v; }
+        public int getStaleSeconds() { return staleSeconds; }
+        public void setStaleSeconds(int v) { this.staleSeconds = v; }
+        public int getBusyWaitMs() { return busyWaitMs; }
+        public void setBusyWaitMs(int v) { this.busyWaitMs = v; }
+        public double getTemperature() { return temperature; }
+        public void setTemperature(double v) { this.temperature = v; }
+        public String getModel() { return model; }
+        public void setModel(String model) { this.model = model; }
+        public String getBaseUrl() { return baseUrl; }
+        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+    }
 
     /**
      * 访问控制。这个项目默认口径是「只自己看」，一旦放到公网就必须打开，

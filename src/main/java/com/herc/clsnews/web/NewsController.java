@@ -414,18 +414,13 @@ public class NewsController {
     }
 
 
-    /**
-     * 当前请求的角色。没开鉴权时 {@link BasicAuthFilter} 这个 Bean 根本不存在，
-     * 请求属性也就没人设 —— 那种状态下按可写处理，和 /api/status 的口径保持一致。
-     */
+    /** 角色与额度口径收在 {@link Roles}，和主线接口共用同一份实现。 */
     private String roleOf(HttpServletRequest req) {
-        Object r = req.getAttribute(BasicAuthFilter.ROLE_ATTR);
-        return r == null ? BasicAuthFilter.ROLE_RW : String.valueOf(r);
+        return Roles.of(req);
     }
 
-    /** 游客有独立日额度；其余角色共用全局 daily-cap。null = 无独立上限。 */
     private Integer capOf(String role) {
-        return BasicAuthFilter.ROLE_GUEST.equals(role) ? props.getSecurity().getGuestDailyCap() : null;
+        return Roles.capOf(role, props);
     }
 
     /** 展示用的上限数字。无独立上限时要落到全局值，不能把 null 丢给前端。 */
@@ -434,9 +429,8 @@ public class NewsController {
         return c == null ? analysis.dailyCap() : c;
     }
 
-    /** 查用量的口径：游客看自己那本账，其他人看全站（daily-cap 是钱包保险丝）。 */
     private String quotaActor(String role) {
-        return BasicAuthFilter.ROLE_GUEST.equals(role) ? role : null;
+        return Roles.quotaActor(role);
     }
 
     private Map<String, Object> stats(String role) {

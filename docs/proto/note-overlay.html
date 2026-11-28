@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Result.note 浮层呈现 · 原型</title>
+<style>
+/* ============ 设计令牌：与 web/src/App.vue 完全一致 ============ */
+:root[data-theme="dark"]{
+  --bg:#0a0b0d; --panel:#101216; --panel-2:#14171c;
+  --line:#1e2128; --line-2:#2a2e37;
+  --text:#e7e9ee; --muted:#868d9b; --dim:#5d646f;
+  --up:#e5484d; --down:#2fa66a; --amber:#d9a441;
+  --amber-line:rgba(217,164,65,.45);
+  --up-line-weak:rgba(229,72,77,.35);
+  --down-line-weak:rgba(47,166,106,.35);
+  --sec-fg:#8fb8d8; --sec-bg:rgba(120,170,220,.1); --sec-line:rgba(120,170,220,.25);
+  --mark-bg:rgba(217,164,65,.22);
+  --on-amber:#0a0b0d;
+  --page:#07080a;
+  --shadow:0 -18px 48px rgba(0,0,0,.55);
+}
+:root[data-theme="light"]{
+  --bg:#faf9f6; --panel:#ffffff; --panel-2:#f4f2ec;
+  --line:#e7e3da; --line-2:#d8d2c6;
+  --text:#1b1a17; --muted:#5e5b54; --dim:#8d887e;
+  --up:#c7363c; --down:#1a7f55; --amber:#9c6d18;
+  --amber-line:rgba(156,109,24,.35);
+  --up-line-weak:rgba(199,54,60,.32);
+  --down-line-weak:rgba(26,127,85,.32);
+  --sec-fg:#2f6b8f; --sec-bg:rgba(47,107,143,.07); --sec-line:rgba(47,107,143,.22);
+  --mark-bg:rgba(156,109,24,.18);
+  --on-amber:#ffffff;
+  --page:#f2efe8;
+  --shadow:0 -14px 40px rgba(80,68,48,.16);
+}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--page);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font-size:14px;
+  line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+  padding:0 0 60px;
+}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+
+/* ============ 页面外壳 ============ */
+.topbar{
+  display:flex;align-items:flex-end;justify-content:space-between;gap:20px;
+  max-width:1180px;margin:0 auto;padding:34px 28px 22px;
+  border-bottom:.5px solid var(--line);
+}
+.kicker{
+  display:inline-block;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--dim);border:.5px solid var(--line-2);border-radius:4px;padding:1px 6px;
+  margin-bottom:10px;
+}
+h1{font-size:20px;font-weight:500;letter-spacing:.2px;margin:0 0 6px}
+.sub{font-size:12.5px;color:var(--muted);margin:0;max-width:52ch}
+.tb-actions{display:flex;gap:8px;flex:none}
+
+.stage{
+  display:grid;grid-template-columns:300px minmax(0,1fr);
+  gap:40px;max-width:1180px;margin:0 auto;padding:28px;
+  align-items:start;
+}
+@media (max-width:900px){.stage{grid-template-columns:1fr;gap:24px}}
+
+/* ============ 控制栏 ============ */
+.rail{position:sticky;top:24px;display:flex;flex-direction:column;gap:22px}
+.rail section{border-bottom:.5px solid var(--line);padding-bottom:18px}
+.rail section:last-child{border-bottom:0}
+.rail h2{
+  font-size:10.5px;font-weight:500;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--dim);margin:0 0 10px;
+}
+.seg{display:flex;flex-direction:column;gap:6px}
+.opt{
+  display:flex;align-items:flex-start;gap:9px;text-align:left;
+  background:transparent;border:.5px solid var(--line-2);border-radius:8px;
+  padding:8px 10px;color:var(--muted);font:inherit;font-size:12.5px;
+  cursor:pointer;transition:border-color .12s,color .12s,background .12s;
+}
+.opt:hover{color:var(--text)}
+.opt.on{color:var(--text);border-color:var(--text);background:var(--panel)}
+.opt .k{
+  font-size:10px;color:var(--dim);border:.5px solid var(--line-2);border-radius:3px;
+  padding:0 4px;line-height:1.6;flex:none;margin-top:2px;
+}
+.opt.on .k{color:var(--text);border-color:var(--line-2)}
+.opt .t{min-width:0}
+.opt .t b{font-weight:500;display:block;line-height:1.45}
+.opt .t i{font-style:normal;font-size:11px;color:var(--dim);display:block;line-height:1.45}
+
+select{
+  width:100%;background:var(--panel);color:var(--text);
+  border:.5px solid var(--line-2);border-radius:8px;
+  font:inherit;font-size:12.5px;padding:7px 9px;
+}
+.rowsel{display:flex;gap:6px}
+.rowsel button{
+  flex:1;background:transparent;border:.5px solid var(--line-2);border-radius:6px;
+  color:var(--muted);font:inherit;font-size:12px;padding:4px 0;cursor:pointer;
+}
+.rowsel button.on{color:var(--text);border-color:var(--text);background:var(--panel)}
+
+.readout{margin:10px 0 0;font-size:11.5px;color:var(--dim);line-height:1.7}
+.readout b{color:var(--muted);font-weight:500}
+.readout .bad{color:var(--amber)}
+.readout .hint{display:block;color:var(--dim);margin-top:4px}
+
+.why p{font-size:11.5px;color:var(--muted);margin:0 0 9px;line-height:1.7}
+.why p:last-child{margin-bottom:0}
+.why em{font-style:normal;color:var(--text)}
+
+/* ============ 手机 ============ */
+.canvas{display:flex;flex-direction:column;align-items:center;gap:16px}
+.phone{
+  position:relative;width:var(--pw,390px);height:764px;
+  background:var(--bg);border-radius:38px;
+  border:.5px solid var(--line-2);
+  box-shadow:0 30px 70px rgba(0,0,0,.35),0 0 0 9px rgba(0,0,0,.32);
+  overflow:hidden;flex:none;
+  transition:width .18s ease;
+}
+:root[data-theme="light"] .phone{box-shadow:0 24px 60px rgba(90,76,54,.18),0 0 0 9px rgba(210,202,186,.5)}
+.notch{
+  position:absolute;top:9px;left:50%;transform:translateX(-50%);
+  width:98px;height:22px;border-radius:11px;background:#000;z-index:5;opacity:.85;
+}
+:root[data-theme="light"] .notch{background:#3b372f;opacity:.75}
+.statusbar{
+  position:absolute;top:0;left:0;right:0;height:44px;z-index:4;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 24px;font-size:11.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+
+/* 背后的资讯列表：压暗后仍能看出「东西还在下面」 */
+.behind{padding:52px 18px 0;filter:blur(.4px)}
+.bh{display:flex;align-items:center;gap:7px;padding-bottom:12px;border-bottom:.5px solid var(--line)}
+.bh .d{width:7px;height:7px;border-radius:50%;background:var(--down)}
+.bh .t{font-size:14.5px;font-weight:500}
+.bh .c{font-size:11px;color:var(--dim);border:.5px solid var(--line-2);border-radius:4px;padding:0 5px}
+.brow{display:flex;gap:12px;padding:12px 0;border-bottom:.5px solid var(--line)}
+.brow .bt{width:46px;flex:none;font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+.brow .bx{font-size:13.5px;line-height:1.6;color:var(--muted)}
+
+.scrim{
+  position:absolute;inset:0;z-index:6;
+  background:linear-gradient(to bottom,rgba(10,11,13,.55),rgba(10,11,13,.82));
+  -webkit-backdrop-filter:blur(1.5px);backdrop-filter:blur(1.5px);
+}
+:root[data-theme="light"] .scrim{
+  background:linear-gradient(to bottom,rgba(250,249,246,.6),rgba(250,249,246,.86));
+}
+
+/* ============ 浮层 ============ */
+.sheet{
+  position:absolute;left:0;right:0;bottom:0;z-index:7;
+  height:calc(100% - 88px);
+  background:var(--panel);
+  border-radius:20px 20px 0 0;
+  border-top:.5px solid var(--line-2);
+  box-shadow:var(--shadow);
+  display:flex;flex-direction:column;
+  animation:rise .34s cubic-bezier(.22,.9,.3,1) both;
+}
+@keyframes rise{from{transform:translateY(26px);opacity:.4}to{transform:none;opacity:1}}
+.grip{width:36px;height:4px;border-radius:2px;background:var(--line-2);margin:8px auto 0;flex:none}
+
+.shead{padding:12px 18px 0;flex:none}
+.stitle{font-size:15px;font-weight:500;letter-spacing:.2px}
+.stitle .live{
+  font-size:10px;font-weight:400;color:var(--amber);border:.5px solid var(--amber-line);
+  border-radius:3px;padding:0 4px;margin-left:6px;vertical-align:1px;letter-spacing:.04em;
+}
+/* 用行内流而不是 flex：flex 下换行会把分隔点甩到下一行行首，看着像列表符号。
+   行内流里分隔点用 ::after 挂在前一项尾巴上，换行时它留在上一行末尾。 */
+.smeta{
+  margin-top:3px;font-size:11.5px;color:var(--dim);
+  font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+.smeta > span{white-space:normal}
+.smeta > span:not(:last-child)::after{content:" · ";color:var(--line-2)}
+
+/* ---- 方案 A：并入 meta 行 ---- */
+.smeta .noteA{
+  color:var(--dim);
+  font-variant-numeric:normal;
+}
+
+/* ---- 方案 B / C：独立一行 ---- */
+.noterow{
+  display:flex;align-items:baseline;gap:10px;
+  margin-top:5px;padding-right:2px;
+}
+.noterow .nt{
+  flex:1;min-width:0;
+  font-size:11.5px;line-height:1.55;color:var(--dim);
+  font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+.noterow .act{
+  flex:none;font-size:11.5px;color:var(--muted);
+  border-bottom:.5px solid var(--line-2);
+  cursor:pointer;white-space:nowrap;
+  line-height:1.35;
+}
+.noterow .act:hover{color:var(--text);border-color:var(--muted)}
+.noterow[data-tone="warn"] .nt{color:var(--amber)}
+.noterow[data-tone="warn"] .nt::before{
+  content:"";display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:var(--amber);margin-right:6px;vertical-align:1.5px;
+}
+.oldtag{
+  font-size:10px;color:var(--amber);border:.5px solid var(--amber-line);
+  border-radius:3px;padding:0 4px;margin-right:5px;vertical-align:1px;
+}
+
+.genbtn{
+  flex:none;font-size:12px;color:var(--muted);
+  border:.5px solid var(--line-2);border-radius:6px;
+  background:transparent;font:inherit;font-size:12px;
+  padding:3px 10px;cursor:pointer;height:26px;
+}
+.genbtn:hover{color:var(--text)}
+.shead .top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+/* 左栏必须 flex:1：只靠 justify-content 分配的话，左栏按内容宽收缩，
+   note 只能用到 230px，一行少放 5 个字，还没人看得出为什么。 */
+.shead .top > .hl{flex:1;min-width:0}
+
+.divider{height:.5px;background:var(--line);margin:12px 18px 0;flex:none}
+
+.bullets{
+  list-style:none;margin:0;padding:6px 18px 8px;flex:1;min-height:0;overflow:auto;
+}
+.bullets li{
+  display:flex;gap:8px;padding:11px 0;border-bottom:.5px solid var(--line);
+  align-items:flex-start;
+}
+.bullets li:last-child{border-bottom:0}
+.bullets .n{
+  flex:none;width:14px;font-size:11.5px;color:var(--dim);
+  font-variant-numeric:tabular-nums;padding-top:3px;
+}
+.bullets .bl{flex:1;min-width:0}
+.bullets .btx{font-size:13.5px;line-height:1.58;color:var(--text)}
+.bullets .bfoot{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:5px}
+.ref{
+  font-size:10px;color:var(--dim);border:.5px solid var(--line);
+  border-radius:3px;padding:0 4px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;
+}
+.exp{
+  font-size:10.5px;color:var(--muted);background:transparent;border:0;
+  padding:0;cursor:pointer;font-family:inherit;
+  border-bottom:.5px solid var(--line-2);line-height:1.4;
+}
+
+.chips{
+  flex:none;display:flex;gap:7px;padding:10px 18px 9px;
+  overflow-x:auto;border-top:.5px solid var(--line);
+}
+.chip{
+  flex:none;font-size:11.5px;color:var(--muted);background:transparent;
+  border:.5px solid var(--line-2);border-radius:13px;padding:4px 11px;
+  font-family:inherit;cursor:pointer;white-space:nowrap;
+}
+.chip.on{color:var(--text);border-color:var(--muted);background:var(--panel-2)}
+
+.askbar{
+  flex:none;display:flex;gap:8px;align-items:center;
+  padding:8px 18px calc(10px + env(safe-area-inset-bottom,0px));
+  border-top:.5px solid var(--line);
+}
+.askbar input{
+  flex:1;min-width:0;background:var(--panel-2);border:.5px solid var(--line);
+  border-radius:9px;color:var(--text);font:inherit;font-size:13px;
+  padding:8px 11px;height:36px;outline:none;
+}
+.askbar input::placeholder{color:var(--dim)}
+.askbar .send{
+  flex:none;width:34px;height:34px;border-radius:9px;
+  background:var(--text);color:var(--on-amber);border:0;
+  font-size:15px;line-height:1;cursor:pointer;
+}
+
+/* ============ 测量条 ============ */
+.measure{
+  font-size:11.5px;color:var(--dim);margin:0;text-align:center;
+  display:flex;gap:14px;flex-wrap:wrap;justify-content:center;
+}
+.measure b{color:var(--muted);font-weight:500}
+.measure .warn{color:var(--amber)}
+
+/* ============ 三方案对照 ============ */
+.compare{max-width:1180px;margin:8px auto 0;padding:0 28px}
+.compare h2{
+  font-size:10.5px;font-weight:500;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--dim);margin:30px 0 4px;
+}
+.compare .lead{font-size:12px;color:var(--muted);margin:0 0 16px}
+.cmps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+@media (max-width:900px){.cmps{grid-template-columns:1fr}}
+.cmp{
+  background:var(--panel);border:.5px solid var(--line);border-radius:12px;
+  padding:14px 14px 16px;position:relative;
+}
+.cmp .tag{
+  font-size:10px;letter-spacing:.06em;color:var(--dim);
+  border:.5px solid var(--line-2);border-radius:3px;padding:0 5px;
+  display:inline-block;margin-bottom:11px;
+}
+.cmp .tag.rec{color:var(--amber);border-color:var(--amber-line)}
+.cmp .head{border-bottom:.5px solid var(--line);padding-bottom:11px;margin-bottom:10px}
+.cmp .head .ct{font-size:14px;font-weight:500}
+.cmp .head .cm{
+  margin-top:2px;font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+.cmp .head .cm > span:not(:last-child)::after{content:" · ";color:var(--line-2)}
+.cmp .head .cn{font-size:11px;color:var(--dim);font-variant-numeric:normal;overflow-wrap:anywhere}
+.cmp .head > .cn{margin-top:3px}
+.cmp .head .cnrow{display:flex;align-items:baseline;gap:10px}
+.cmp .head .cnrow #cmpNoteC{flex:1;min-width:0}
+.cmp .head .mini{
+  flex:none;color:var(--muted);white-space:nowrap;
+  border-bottom:.5px solid var(--line-2);line-height:1.35;
+}
+.cmp .desc{font-size:11.5px;color:var(--muted);line-height:1.65;margin:0}
+.cmp .desc b{font-weight:500;color:var(--text)}
+.cmp[data-tone="warn"] .cn{color:var(--amber)}
+
+/* 页脚 */
+.notes{max-width:1180px;margin:34px auto 0;padding:0 28px}
+.notes .box{
+  border:.5px solid var(--line);border-radius:12px;padding:16px 18px;
+  background:var(--panel);
+}
+.notes h3{font-size:12.5px;font-weight:500;margin:0 0 8px}
+.notes ul{margin:0;padding-left:18px}
+.notes li{font-size:12px;color:var(--muted);line-height:1.8}
+.notes li code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+  background:var(--panel-2);border-radius:3px;padding:1px 4px;color:var(--text);
+}
+.matrix{
+  width:100%;border-collapse:collapse;margin-top:16px;
+  font-size:11.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+.matrix th,.matrix td{
+  text-align:left;padding:6px 8px;border-bottom:.5px solid var(--line);
+}
+.matrix th{
+  font-weight:500;font-size:10.5px;color:var(--dim);
+  letter-spacing:.06em;text-transform:uppercase;
+}
+.matrix td:nth-child(2),.matrix th:nth-child(2){text-align:right;width:52px}
+.matrix td:nth-child(n+3),.matrix th:nth-child(n+3){text-align:center;width:52px}
+.matrix td:first-child{color:var(--text)}
+.matrix td i{font-style:normal;font-size:10.5px;color:var(--dim)}
+.matrix .ok{color:var(--muted)}
+.matrix .bad{color:var(--amber)}
+.boundary{margin:12px 0 0;font-size:11.5px;color:var(--muted);line-height:1.75}
+.boundary b{color:var(--text);font-weight:500}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div>
+    <span class="kicker">S1.4 · 原型 · 已定方案 B</span>
+    <h1>Result.note 在浮层里怎么呈现</h1>
+    <p class="sub">note 不是错误，是「为什么这次没重算」的解释。用最弱的一层灰，但不能弱到看不见——尤其当它说的是「你看的是旧版」。<br>
+      下面是定稿后的真实文案（≤16 字，三档屏宽单行）；下拉框最后一项是改前的 29 字，留着当证据。</p>
+  </div>
+  <div class="tb-actions">
+    <button class="opt" id="themeBtn" style="padding:6px 12px">切换浅色</button>
+  </div>
+</header>
+
+<div class="stage">
+  <aside class="rail">
+    <section>
+      <h2>呈现方案</h2>
+      <div class="seg" id="variantSeg">
+        <button class="opt" data-v="A">
+          <span class="k">A</span>
+          <span class="t"><b>并入 meta 行</b><i>16:20 生成 · 88 条 · 5 条主线 · 新增 2 条…</i></span>
+        </button>
+        <button class="opt on" data-v="B">
+          <span class="k">B</span>
+          <span class="t"><b>独立一行灰字</b><i>meta 下面另起一行，11.5px --dim</i></span>
+        </button>
+        <button class="opt" data-v="C">
+          <span class="k">C</span>
+          <span class="t"><b>独立一行 + 重算</b><i>右侧挂「强制重算 ›」，点掉缓存</i></span>
+        </button>
+      </div>
+    </section>
+
+    <section>
+      <h2>note 真实文案</h2>
+      <select id="sceneSel"></select>
+      <p class="readout" id="readout"></p>
+    </section>
+
+    <section>
+      <h2>屏宽</h2>
+      <div class="rowsel" id="widthSeg">
+        <button data-w="390" class="on">390</button>
+        <button data-w="360">360</button>
+        <button data-w="320">320</button>
+      </div>
+      <p class="readout" style="margin-top:8px">320 是 iPhone SE 一代 / 小米小屏的下限，用来验「两行会不会变三行」。</p>
+    </section>
+
+    <section class="why">
+      <h2>为什么这么放</h2>
+      <p><em>不和按钮抢位置。</em>「刷新」在右上角，note 说的是刷新为什么没生效，贴在它旁边会被读成按钮的一部分。</p>
+      <p><em>不并进 meta。</em>meta 是「结果的身份」：什么时候生成、多少条材料、几条主线。note 是「这次动作的结论」，两者生命周期不同——meta 变说明换了结果，note 变只说明你点了一下。</p>
+      <p><em>但降级必须显形。</em>note 说「已回退上一版」时，用户看的其实是旧内容，纯灰字会被当成装饰跳过，所以要转琥珀 + 加圆点 + 挂「旧版」徽标。</p>
+    </section>
+  </aside>
+
+  <main class="canvas">
+    <div class="phone" id="phone">
+      <div class="notch"></div>
+      <div class="statusbar"><span>16:24</span><span>●●● ⌁ ▮</span></div>
+
+      <div class="behind" aria-hidden="true">
+        <div class="bh"><span class="d"></span><span class="t">实时资讯助手</span><span class="c">cls.cn</span></div>
+        <div class="brow"><div class="bt">16:18</div><div class="bx">商务部：1—10 月全国实际使用外资同比降 8.2%，高技术制造业实际使用外资占比提升</div></div>
+        <div class="brow"><div class="bt">16:11</div><div class="bx">德福科技公告：拟以 2 亿元回购股份，回购价格不超过 28 元/股</div></div>
+        <div class="brow"><div class="bt">16:05</div><div class="bx">现货白银日内涨幅扩大至 7%，沪银主力合约触及涨停</div></div>
+        <div class="brow"><div class="bt">15:57</div><div class="bx">央行开展 4500 亿元 MLF 操作，中标利率维持不变</div></div>
+        <div class="brow"><div class="bt">15:49</div><div class="bx">霍尔木兹海峡附近一艘油轮报告异常，布伦特原油短线拉升 1.8%</div></div>
+      </div>
+
+      <div class="scrim"></div>
+
+      <section class="sheet">
+        <div class="grip"></div>
+
+        <div class="shead">
+          <div class="top">
+            <div class="hl" style="min-width:0">
+              <div class="stitle">今日主线</div>
+              <div class="smeta" id="smeta">
+                <span>16:20 生成</span><span>88 条</span><span>5 条主线</span>
+              </div>
+              <div class="noterow" id="noterow" hidden>
+                <span class="nt" id="noteText"></span>
+                <span class="act" id="noteAct" hidden>强制重算 ›</span>
+              </div>
+            </div>
+            <button class="genbtn">刷新</button>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <ol class="bullets">
+          <li><span class="n">1</span><div class="bl">
+            <div class="btx">白银大涨 7%，贵金属链集体走强</div>
+            <div class="bfoot"><span class="ref">1312</span><span class="ref">1301</span><button class="exp">展开</button></div>
+          </div></li>
+          <li><span class="n">2</span><div class="bl">
+            <div class="btx">德福科技 2 亿回购，回购潮在中小盘延续</div>
+            <div class="bfoot"><span class="ref">1298</span><button class="exp">展开</button></div>
+          </div></li>
+          <li><span class="n">3</span><div class="bl">
+            <div class="btx">国内稳增长信号密集：降准预期升温 + 专项债发行提速</div>
+            <div class="bfoot"><span class="ref">1305</span><span class="ref">1309</span><span class="ref">1311</span><button class="exp">展开</button></div>
+          </div></li>
+          <li><span class="n">4</span><div class="bl">
+            <div class="btx">霍尔木兹局势升温，油价与航运费率同涨</div>
+            <div class="bfoot"><span class="ref">1287</span><span class="ref">1290</span><button class="exp">展开</button></div>
+          </div></li>
+          <li><span class="n">5</span><div class="bl">
+            <div class="btx">美联储官员再放鹰，12 月降息概率回落至 42%</div>
+            <div class="bfoot"><span class="ref">1281</span><span class="ref">1284</span><button class="exp">展开</button></div>
+          </div></li>
+        </ol>
+
+        <div class="chips">
+          <button class="chip on">今日热点</button>
+          <button class="chip">英伟达</button>
+          <button class="chip">A股异动</button>
+        </div>
+
+        <div class="askbar">
+          <input placeholder="问点什么…" readonly>
+          <button class="send">↑</button>
+        </div>
+      </section>
+    </div>
+
+    <p class="measure" id="measure"></p>
+  </main>
+</div>
+
+<div class="compare">
+  <h2>三种方案并排看</h2>
+  <p class="lead">同一段文案（当前选中的那条）、同一宽度下的头像区。注意 A 会把 meta 挤成两行，B/C 的 meta 始终是一行。</p>
+  <div class="cmps">
+    <div class="cmp" id="cmpA">
+      <span class="tag">方案 A</span>
+      <div class="head">
+        <div class="ct">今日主线</div>
+        <div class="cm"><span>16:20 生成</span><span>88 条</span><span>5 条主线</span><span class="cn" id="cmpNoteA"></span></div>
+      </div>
+      <p class="desc"><b>省一行高度</b>，但 note 一长就和「5 条主线」挤在一起，读者分不清哪个是结果、哪个是解释。文案再长一点就会把这一整块推到三行。</p>
+    </div>
+    <div class="cmp" id="cmpB">
+      <span class="tag rec">方案 B · 推荐</span>
+      <div class="head">
+        <div class="ct">今日主线</div>
+        <div class="cm"><span>16:20 生成</span><span>88 条</span><span>5 条主线</span></div>
+        <div class="cn" id="cmpNoteB"></div>
+      </div>
+      <p class="desc"><b>层级干净</b>：meta 只描述结果，note 单独说动作。没有 note 时整行不渲染，不留空位。</p>
+    </div>
+    <div class="cmp" id="cmpC">
+      <span class="tag">方案 C</span>
+      <div class="head">
+        <div class="ct">今日主线</div>
+        <div class="cm"><span>16:20 生成</span><span>88 条</span><span>5 条主线</span></div>
+        <div class="cn cnrow">
+          <span id="cmpNoteC"></span><span class="mini">重算 ›</span>
+        </div>
+      </div>
+      <p class="desc"><b>把「不服」变成动作</b>：用户看到「未达阈值」往往就是想强算一次。代价是接口要加 bypass 参数，且必须在点击时提示要花多少钱。</p>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="box">
+    <h3>量出来的三个事实（2026-11-28 定稿）</h3>
+    <ul>
+      <li>标题区可用宽只有 <b>290 / 264 / 224px</b>（390 / 360 / 320），因为右边站着「刷新」。11.5px 下大约对应 <b>25 / 22 / 19</b> 个字，不是屏宽除以字号。</li>
+      <li>改前的文案最长 29 字（表格最后一行），<b>390px 上也折两行</b>，第二行只剩「防结论逐代漂移」这种半句。没人量过，它就那么在代码里躺了一版。</li>
+      <li>现在七句话全部压到 <b>≤16 字</b>，三档屏宽都单行 —— 连带「旧版」徽标的回退提示也一样（徽标占掉约 3 个字）。</li>
+      <li>所以 <code>Strategy.MAX_NOTE_WIDTH = 18</code> 是可执行断言，不是注释：<code>NoteCopyTest</code> 5 条盯着它，改文案改超了直接红。</li>
+      <li>过程量（日期、字符数、今日第几次）现在只进日志：<code>prepare</code> 里一行 <code>mode/reason/added/deltaToday</code>，够定位，也不占浮层的宽度。</li>
+      <li>C 方案的「重算」只在 <code>cached=true</code> 时出现——那正是用户被缓存挡住、最想强算的时刻；其余场景挂个重算按钮纯属多给一次花钱的机会。<b>这一条还没做，等浮层骨架跑起来再定。</b></li>
+    </ul>
+
+    <table class="matrix">
+      <thead>
+        <tr><th>文案</th><th>字数</th><th>390</th><th>360</th><th>320</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>上一版不是今天的，重新全量</td><td>13</td><td class="ok">1</td><td class="ok">1</td><td class="ok">1</td></tr>
+        <tr><td>数据没有变化，直接返回上一版</td><td>14</td><td class="ok">1</td><td class="ok">1</td><td class="ok">1</td></tr>
+        <tr><td>新增 6 条，带旧结论只发增量</td><td>14</td><td class="ok">1</td><td class="ok">1</td><td class="ok">1</td></tr>
+        <tr><td>新增 2 条，未达阈值，先看上一版</td><td>16</td><td class="ok">1</td><td class="ok">1</td><td class="ok">1</td></tr>
+        <tr><td>结果较上一版骤减，已回退上一版 <i>（带「旧版」徽标）</i></td><td>15</td><td class="ok">1</td><td class="ok">1</td><td class="ok">1</td></tr>
+        <tr><td>今日已增量 3 次（上限 3 次），这次回全量，防止结论逐代漂移 <i>（改前）</i></td><td>29</td><td class="bad">2</td><td class="bad">2</td><td class="bad">2</td></tr>
+      </tbody>
+    </table>
+
+    <p class="boundary">顺带量到的分界线（用改前那批文案测的）：<b>20–21 字</b>在 390 / 360 还是单行，320 就折了；<b>19 字</b>是三档通吃的上限。所以 18 不是拍的，是往下取了一格。</p>
+  </div>
+</div>
+
+<script>
+/* ============ 场景：全部取自 Strategy.decide 的真实返回值 ============ */
+const SCENES = [
+  { id:'none',       label:'无 note（正常全量生成）', tone:'normal', note:'', act:false },
+  { id:'same',       label:'数据无变化（CACHE / SAME_WATERMARK）', tone:'normal', act:true,
+    note:'数据没有变化，直接返回上一版' },
+  { id:'tooFew',     label:'新增不够（CACHE / TOO_FEW_ADDED）', tone:'normal', act:true,
+    note:'新增 2 条，未达阈值，先看上一版' },
+  { id:'tooMany',    label:'新增太多（FULL / TOO_MANY_ADDED）', tone:'normal', act:false,
+    note:'新增 78 条，太多，这次走全量' },
+  { id:'deltaLimit', label:'今日增量到顶（FULL / DELTA_LIMIT）', tone:'warn', act:false,
+    note:'今日增量已满 3 次，这次走全量' },
+  { id:'crossDay',   label:'跨天作废（FULL / CROSS_DAY）', tone:'warn', act:false,
+    note:'上一版不是今天的，重新全量' },
+  { id:'downgrade',  label:'降级全量（成本闸 / 上一版读不出来）', tone:'warn', act:false,
+    note:'上一版读不出来，这次走全量' },
+  { id:'rollback',   label:'骤减回退（suspect 护栏）', tone:'warn', act:false, old:true,
+    note:'结果较上一版骤减，已回退上一版' },
+  { id:'delta',      label:'正常增量（DELTA）', tone:'normal', act:false,
+    note:'新增 6 条，带旧结论只发增量' },
+  { id:'legacy',     label:'⚠ 改前文案（29 字，已废弃）', tone:'normal', act:false,
+    note:'今日已增量 3 次（上限 3 次），这次回全量，防止结论逐代漂移' },
+];
+
+const $ = (s) => document.querySelector(s);
+const smeta = $('#smeta');
+const noterow = $('#noterow');
+const noteText = $('#noteText');
+const noteAct = $('#noteAct');
+
+let variant = 'B';
+let sceneId = 'tooFew';
+let width = 390;
+
+/* 下拉选项 */
+const sel = $('#sceneSel');
+SCENES.forEach((s) => {
+  const o = document.createElement('option');
+  o.value = s.id;
+  o.textContent = s.label;
+  sel.appendChild(o);
+});
+sel.value = sceneId;
+
+function current(){ return SCENES.find((s) => s.id === sceneId) || SCENES[0]; }
+
+/** 逐字符量真实行数：Range.getClientRects 对每个换行段返回一个矩形 */
+function lines(el){
+  if (!el || !el.firstChild) return 0;
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  const tops = new Set(
+    [...r.getClientRects()].filter((x) => x.width > 0 && x.height > 0)
+      .map((x) => Math.round(x.top))
+  );
+  return tops.size;
+}
+
+function charLen(s){
+  // 全角算 1，半角算 0.5，近似「视觉宽度」
+  let n = 0;
+  for (const ch of s) n += ch.charCodeAt(0) > 255 ? 1 : 0.5;
+  return n;
+}
+
+function render(){
+  const sc = current();
+
+  /* 清掉上一轮 A 方案塞进 meta 的节点 */
+  smeta.querySelectorAll('.noteA').forEach((n) => n.remove());
+  noterow.hidden = true;
+  noterow.dataset.tone = sc.tone;
+  noteText.textContent = '';
+  noteAct.hidden = true;
+
+  if (sc.id !== 'none') {
+    if (variant === 'A') {
+      const s = document.createElement('span');
+      s.className = 'noteA';
+      s.textContent = sc.note;
+      /* A 方案也要能标降级 */
+      if (sc.tone === 'warn') s.style.color = 'var(--amber)';
+      smeta.appendChild(s);
+    } else {
+      noterow.hidden = false;
+      if (sc.old) {
+        const tag = document.createElement('span');
+        tag.className = 'oldtag';
+        tag.textContent = '旧版';
+        noteText.appendChild(tag);
+      }
+      /* 正文单独包一层：徽标是 inline-block，它的矩形 top 和文字差 1px，
+         直接量父节点会把「一行」数成两行。只量这层文字。 */
+      const body = document.createElement('span');
+      body.className = 'nb';
+      body.textContent = sc.note;
+      noteText.appendChild(body);
+      noteAct.hidden = !(variant === 'C' && sc.act);
+    }
+  }
+
+  /* 测量条：文案长度 + 实测行数 */
+  const target = variant === 'A'
+    ? smeta.querySelector('.noteA')
+    : noteText.querySelector('.nb');
+  const n = sc.id === 'none' ? 0 : lines(target);
+  const chars = sc.id === 'none' ? 0 : Math.round(charLen(sc.note));
+
+  /* 单行上限按实测可用宽度算，不写死：换屏宽、换方案（C 多一个按钮）都会变 */
+  let avail = width - 36;
+  if (!noterow.hidden) avail = noteText.clientWidth || avail;
+  else if (variant === 'A' && target) avail = smeta.clientWidth || avail;
+  const limit = Math.floor(avail / 11.5);
+
+  $('#measure').innerHTML = sc.id === 'none'
+    ? '<span>当前场景没有 note：<b>整行不渲染</b>，不留空白</span>'
+    : `<span>文案 <b>${chars}</b> 字</span>`
+      + `<span>实测 <b class="${n > 1 ? 'warn' : ''}">${n} 行</b> @ ${width}px</span>`
+      + `<span>可用宽 ${Math.round(avail)}px ≈ ${limit} 字</span>`
+      + `<span>${n > 1 ? '超出单行' : chars > limit - 3 ? '单行，但已贴边' : '单行放得下'}</span>`;
+
+  /* 读数 */
+  $('#readout').innerHTML =
+    `<b>${sc.label}</b><br>`
+    + `文案：<b>${chars}</b> 字（全角）· 当前 ${width}px 单行上限约 <b>${limit}</b> 字<br>`
+    + `<span class="hint">${sc.tone === 'warn' ? '这类要转琥珀：用户看到的可能不是最新内容' : '普通提示，用最弱的 --dim'}${
+        variant === 'C' && sc.act ? '；C 方案下额外挂「强制重算」' : ''
+      }</span>`;
+
+  /* 三方案对照卡 */
+  $('#cmpNoteA').textContent = sc.note;
+  $('#cmpNoteB').textContent = sc.note;
+  $('#cmpNoteC').textContent = sc.note;
+  $('#cmpA').dataset.tone = sc.tone;
+  $('#cmpB').dataset.tone = sc.tone;
+  $('#cmpC').dataset.tone = sc.tone;
+  $('#cmpA').querySelector('.cn').style.color = sc.tone === 'warn' ? 'var(--amber)' : '';
+
+  /* 三卡的 meta 里 A 会折行，标注一下 */
+  const wrapped = lines($('#cmpNoteA')) > 1;
+  $('#cmpA').classList.toggle('wrapped', wrapped);
+  if (sc.id === 'none') {
+    $('#cmpNoteA').textContent = '（无 note）';
+    $('#cmpNoteB').textContent = '（整行不渲染）';
+    $('#cmpNoteC').textContent = '（整行不渲染）';
+  }
+
+  applyVariantUI();
+}
+
+function applyVariantUI(){
+  document.querySelectorAll('#variantSeg .opt').forEach((b) =>
+    b.classList.toggle('on', b.dataset.v === variant));
+}
+
+/* 事件 */
+document.querySelectorAll('#variantSeg .opt').forEach((b) => {
+  b.addEventListener('click', () => { variant = b.dataset.v; render(); });
+});
+document.querySelectorAll('#widthSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    width = Number(b.dataset.w);
+    document.querySelectorAll('#widthSeg button').forEach((x) =>
+      x.classList.toggle('on', x === b));
+    $('#phone').style.setProperty('--pw', width + 'px');
+    $('#phone').style.width = width + 'px';
+    render();
+  });
+});
+sel.addEventListener('change', () => { sceneId = sel.value; render(); });
+
+$('#themeBtn').addEventListener('click', () => {
+  const cur = document.documentElement.dataset.theme;
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  $('#themeBtn').textContent = next === 'dark' ? '切换浅色' : '切换深色';
+  requestAnimationFrame(render);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === '1') { variant = 'A'; render(); }
+  if (e.key === '2') { variant = 'B'; render(); }
+  if (e.key === '3') { variant = 'C'; render(); }
+});
+
+/* 链接里带 ?scene=deltaLimit&v=C&w=360 可复现任意状态，方便甩给同事看 */
+(function fromUrl(){
+  const q = new URLSearchParams(location.search);
+  if (q.get('v') && ['A','B','C'].includes(q.get('v'))) variant = q.get('v');
+  if (q.get('scene') && SCENES.some((s) => s.id === q.get('scene'))) sceneId = q.get('scene');
+  if (q.get('w')) width = Number(q.get('w')) || width;
+  sel.value = sceneId;
+  document.querySelectorAll('#widthSeg button').forEach((x) =>
+    x.classList.toggle('on', Number(x.dataset.w) === width));
+  $('#phone').style.width = width + 'px';
+  if (q.get('theme') === 'light') {
+    document.documentElement.dataset.theme = 'light';
+    $('#themeBtn').textContent = '切换深色';
+  }
+  applyVariantUI();
+})();
+
+render();
+/* 字体加载完行数会变，重算一次 */
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(render);
+window.addEventListener('resize', render);
+
+/* 自检模式：?probe=1 把「每个场景 × 每种屏宽」的实测行数摊开，用来定文案长度上限 */
+if (new URLSearchParams(location.search).get('probe')) {
+  const out = [];
+  variant = 'B';
+  /* 必须关掉 width 过渡：否则 getClientRects 量到的是动画中间态，
+     320 会量出 390 的结果，全部「1 行」看起来一片大好 */
+  $('#phone').style.transition = 'none';
+  SCENES.forEach((s) => {
+    if (!s.note) return;
+    const row = { scene: s.id, chars: Math.round(charLen(s.note)) };
+    [390, 360, 320].forEach((w) => {
+      width = w;
+      $('#phone').style.width = w + 'px';
+      sceneId = s.id;
+      render();
+      row['l' + w] = lines(noteText.querySelector('.nb'));
+    });
+    out.push(row);
+  });
+  const pre = document.createElement('pre');
+  pre.id = 'probe';
+  pre.textContent = JSON.stringify(out, null, 1);
+  pre.style.cssText = 'position:absolute;left:-9999px';
+  document.body.appendChild(pre);
+}
+</script>
+</body>
+</html>

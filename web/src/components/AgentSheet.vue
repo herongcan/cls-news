@@ -54,6 +54,14 @@ const bullets = computed(() => result.value?.bullets ?? [])
  * 把这一版的步骤写进上一版的结果里，界面会显示"上一版结论 + 这一版的取数条数"。
  */
 const liveSteps = ref<AgentStep[]>([])
+/**
+ * 这份结论是「这次刚流式生成出来的」还是「读回来的」。
+ *
+ * <p>只在 onDone 那一刻置 true，用来压住"第一次见过程自动展开"—— 那次展开的
+ * 意义是让人知道"有过程可看"，而刚生成的这次过程已经在生成中展开过、又在结果
+ * 到达时收起来了，watch 不该再把它顶开。读回旧结论（缓存命中）时才需要那一下。
+ */
+let justStreamed = false
 
 /** 已经等了多少秒。用于模型那一步的心跳，前端自己数，不靠服务端推 */
 const waited = ref(0)
@@ -96,6 +104,9 @@ function pushStep(s: AgentStep): void {
   const at = liveSteps.value.findIndex((x) => x.k === s.k)
   if (at >= 0) liveSteps.value.splice(at, 1, s)
   else liveSteps.value.push(s)
+  // 生成中必须展开：这一步的全部意义就是让人看到它在动，
+  // 收起来等于什么都没做 —— 而"有过程但没展开"和"根本没过程"在屏幕上长得一样
+  showSteps.value = true
 }
 
 /**
@@ -133,21 +144,25 @@ function stop(): void {
 onUnmounted(stop)
 
 /**
- * 第一次拿到过程时自动展开。
+ * 第一次拿到<b>落库后的</b>过程时自动展开一次。
  *
  * <p>折叠区默认收起是对的（一块 7 行会挤掉结论），但"默认收起"和"根本不存在"
  * 在屏幕上长得一样 —— 反馈里两次都是"没看到过程"。所以先展开一次让人知道它在这儿，
  * 之后完全交给用户：看过就不再自动展开。
+ *
+ * <p>这里只盯着 {@code result.steps}（落库那份），不看 liveSteps：生成中的展开由
+ * {@code onStep} 那一路显式做，两条路径不能互相打架 —— 否则「结果到了该折叠」会被
+ * 「第一次见过程该展开」重新顶开，界面就停在"结论在屏上、过程也摊开"的僵持态。
  */
 const STEPS_SEEN = 'agent-steps-seen'
 watch(
-  () => steps.value.length,
+  () => result.value?.steps?.length ?? rejected.value?.steps?.length ?? 0,
   (n) => {
     if (!n) return
-    // 生成中必须展开。这一步的全部意义就是让人看到它在动，
-    // 这时候收起来等于什么都没做 —— 而"有过程但没展开"和"根本没过程"长得一样
-    if (busy.value === 'run') {
-      showSteps.value = true
+    // 刚流式生成完的那次不自动展开：它已经在生成中展开过、又在 done 时收起来了，
+    // 这里再顶开就等于"结果到了又把过程摊出来"，和"输出后折叠"的诉求正好相反
+    if (justStreamed) {
+      justStreamed = false
       return
     }
     try {
@@ -384,7 +399,11 @@ function run(): void {
       // 结论到了就交还给库里那份：内容与 liveSteps 相同（同一次生成），
       // 但以 done 为准，才能保证"界面显示的"和"按 runId 查到的"永远一致
       liveSteps.value = []
-      showSteps.value = true
+      // 结果出来了，过程收起来：过程的价值在"生成中看着它动"，结论到了就该把屏幕还给主线。
+      // 想看过程的人自己点开 —— 这里不再替他展开（展开的默认值交给"第一次看过"那次）
+      showSteps.value = false
+      // 标记"这次是刚生成的"，压住 watch 的"第一次见过程自动展开"，避免结果又被顶开
+      justStreamed = true
     },
     onError: (e) => {
       err.value = msg(e)

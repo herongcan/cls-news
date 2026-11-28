@@ -209,8 +209,11 @@ export function streamPost(
       if (settled) return
       dispatch(f, handlers)
       if (f.event === 'done' || f.event === 'error') {
-        // 服务端在 done 之后还会 complete，前端不必等 EOF：先收尾，剩下的字节没有意义
-        settled = true
+        // 服务端在 done 之后还会 complete，前端不必等 EOF：先收尾，剩下的字节没有意义。
+        // 必须在这里直接走 finish()，而不是只把 settled 置 true 等外层再收 ——
+        // finish() 的第一行就是 if(settled) return，晚一步它就会把 onClose 吞掉，
+        // 结果 busy 永远停在「生成中」（2026-11-28 真机卡死就是这条）
+        finish()
       }
     }
   }
